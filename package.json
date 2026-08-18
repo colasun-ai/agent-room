@@ -1,0 +1,50 @@
+{
+  "name": "agent-room",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "e2e": "playwright test",
+    "deploy": "npm run build && wrangler deploy -c dist/agent_room/wrangler.json",
+    "runtime:status": "node scripts/runtime/status.mjs",
+    "runtime:gate": "node scripts/runtime/gate.mjs"
+  },
+  "dependencies": {
+    "idb": "^8.0.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.13.0",
+    "@cloudflare/workers-types": "^5.20260818.1",
+    "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.57.0",
+    "@testing-library/jest-dom": "^6.9.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^16.5.0",
+    "jsdom": "^27.2.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.48.0",
+    "vite": "^7.2.0",
+    "vitest": "^4.0.0",
+    "wrangler": "^4.50.0"
+  }
+}

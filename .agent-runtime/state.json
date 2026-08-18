@@ -1,0 +1,20 @@
+{
+  "runtimeSchema": 1,
+  "revision": 1,
+  "phase": "runtime-bootstrap",
+  "releaseClass": "PUBLIC_BETA",
+  "deploymentState": "NOT_DEPLOYED",
+  "tasks": [
+    {"id":"T-001","title":"Bootstrap runtime and contracts","owner":"lead","status":"RUNNING","priority":"P0","phase":"bootstrap","dependsOn":[]},
+    {"id":"T-100","title":"Frontend and local state","owner":"frontend-agent","status":"BACKLOG","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
+    {"id":"T-200","title":"Worker engine and control plane","owner":"backend-agent","status":"BACKLOG","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
+    {"id":"T-300","title":"Security review","owner":"security-agent","status":"BACKLOG","priority":"P0","phase":"review","dependsOn":["T-100","T-200"]},
+    {"id":"T-400","title":"Final QA and release","owner":"qa-release-agent","status":"BACKLOG","priority":"P0","phase":"release","dependsOn":["T-300"]}
+  ],
+  "gates": {"runtime":"IN_PROGRESS","contracts":"PENDING","security":"PENDING","predeploy":"PENDING","public":"PENDING"},
+  "openIssues": [
+    {"severity":"BLOCKER","type":"environment","summary":"Public deployment and real upstream smoke not yet verified"},
+    {"severity":"MAJOR","type":"implementation","summary":"Application implementation not yet complete"}
+  ]
+}
+

@@ -1,0 +1,11 @@
+{
+  "runtimeSchema": 1,
+  "projectId": "agent-room",
+  "workspaceRoot": "/Users/colasun/Projects/agent-room",
+  "gitRoot": "/Users/colasun/Projects/agent-room",
+  "authoritativeTaskBackend": ".agent-runtime/state.json",
+  "availableCodexCapabilities": ["native-subagents", "isolated-contexts", "git-worktrees", "task-messaging"],
+  "maxAgentConcurrency": 4,
+  "createdAt": "2026-08-18T00:00:00+08:00"
+}
+

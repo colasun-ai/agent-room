@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "project": "agent-room",
+  "localRoots": ["/Users/colasun/Projects/agent-room"],
+  "allowedCloudflareWorkers": ["agent-room", "agent-room-staging"],
+  "allowedGitHubRepositories": ["colasun-ai/agent-room"],
+  "productionReleaseOwner": "lead",
+  "forbidden": [
+    "/Users/colasun/Projects/free-nim-chat",
+    "all unrelated repositories and Cloudflare resources"
+  ]
+}
+

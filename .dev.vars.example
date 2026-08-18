@@ -1,0 +1,9 @@
+NVIDIA_API_KEY=replace-with-local-development-key
+SESSION_HMAC_SECRET=replace-with-at-least-32-random-bytes
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET_KEY=
+SMOKE_TEST_SECRET=
+ENVIRONMENT=development
+PUBLIC_ORIGIN=http://127.0.0.1:5173
+MOCK_UPSTREAM=true
+

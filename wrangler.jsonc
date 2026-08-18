@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-room",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-18",
+  "compatibility_flags": ["enable_request_signal", "request_signal_passthrough"],
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "AI_ENABLED": "true",
+    "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+    "DEFAULT_MODEL": "meta/llama-3.3-70b-instruct",
+    "PUBLIC_ORIGIN": "https://agent-room.workers.dev",
+    "PROTOCOL_TAG": "agentroom.v1",
+    "OPERATING_UPSTREAM_RPM": "28",
+    "GLOBAL_DAILY_ATTEMPT_LIMIT": "24000",
+    "MAX_CONCURRENT_UPSTREAM": "2"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "CONTROL_PLANE", "class_name": "ControlPlane" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ControlPlane"] }],
+  "assets": { "not_found_handling": "single-page-application" }
+}
+
