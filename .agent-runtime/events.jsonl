@@ -1,2 +1,4 @@
 {"timestamp":"2026-08-18T00:00:00+08:00","agentId":"lead","taskId":"T-001","event":"runtime-created","branch":"main","result":"native subagent runtime selected"}
-
+{"timestamp":"2026-08-18T21:23:05+08:00","agentId":"runtime_writer","contextId":"/root/runtime_writer","taskId":"T-001","event":"selftest-finish","worktree":"/private/tmp/agent-room-runtime-selftest","branch":"runtime/selftest","baseline":"cbdc6bc","commit":"275860e","result":"isolated writer committed owned fixture"}
+{"timestamp":"2026-08-18T21:24:45+08:00","agentId":"runtime-reviewer","contextId":"/root/prd_release","taskId":"T-001","event":"review-finish","worktree":"/private/tmp/agent-room-runtime-selftest","branch":"runtime/selftest","baseline":"cbdc6bc","result":"APPROVE"}
+{"timestamp":"2026-08-18T21:25:17+08:00","agentId":"lead","taskId":"T-001","event":"integrate","branch":"main","commit":"01a8950","result":"runtime self-test integrated and fixture scheduled for cleanup"}
