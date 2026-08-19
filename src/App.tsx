@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { normalizeAgentName, TURN_LIMITS, type TurnLimit } from '../shared/protocol'
 import { AgentRoomApiError, api } from './api'
 import { AgentEditor, blankAgent } from './components/AgentEditor'
 import { MarkdownMessage } from './components/MarkdownMessage'
+import { TurnstileChallenge } from './components/TurnstileChallenge'
 import { clearAllLocalData, deleteRoomCascade, listRooms, putRoom, putRun, recoverInterruptedMessages, saveNewRoom } from './db'
 import { translator } from './i18n'
 import type { Language, LocalAgent, LocalMessage, LocalRoom, LocalRun, ThemePreference } from './model'
@@ -51,36 +52,43 @@ function NewRoom({ t }: { t: ReturnType<typeof translator> }) {
   const templateId = (params.get('template') ?? 'startup') as TemplateId
   const template = ROOM_TEMPLATES.find((item) => item.id === templateId) ?? ROOM_TEMPLATES[0]
   const [roomId] = useState(() => crypto.randomUUID())
+  const [runId] = useState(() => crypto.randomUUID())
   const [title, setTitle] = useState(template.title)
   const [topic, setTopic] = useState(template.topic)
   const [turnLimit, setTurnLimit] = useState<TurnLimit>(template.turnLimit)
   const [agents, setAgents] = useState(() => instantiateTemplate(template.id, roomId))
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string>()
+  const [challengeSiteKey, setChallengeSiteKey] = useState<string>()
   const enabled = agents.filter((agent) => agent.enabled)
   const uniqueNames = new Set(enabled.map((agent) => normalizeAgentName(agent.name))).size === enabled.length && enabled.every((agent) => agent.name.trim())
   const valid = title.trim() && topic.trim() && enabled.length >= 2 && enabled.length <= 6 && uniqueNames && agents.every((agent) => agent.role.trim() && agent.personality.trim() && agent.goal.trim())
   const updateAgent = (index: number, next: LocalAgent) => setAgents((current) => current.map((agent, itemIndex) => itemIndex === index ? next : agent))
-  const submit = async (event: FormEvent) => {
-    event.preventDefault(); if (!valid || submitting) return
+  const startRoom = useCallback(async (challengeToken?: string) => {
+    if (!valid || submitting) return
     setSubmitting(true); setError(undefined)
-    const now = Date.now(); const runId = crypto.randomUUID()
+    const now = Date.now()
     const draft: LocalRoom = { id: roomId, title: title.trim(), topic: topic.trim(), status: 'draft', totalTurnsCompleted: 0, activeRunId: runId, createdAt: now, updatedAt: now, schemaRevision: 1 }
     const pausedRun: LocalRun = { id: runId, roomId, turnLimit, turnsCompleted: 0, status: 'paused', createdAt: now }
     try {
       await saveNewRoom(draft, pausedRun, agents)
-      await api.session()
-      const registered = await api.register({ roomId, runId, turnLimit, protocolTag: 'agentroom.v1', roster: agents.map((agent) => ({ agentId: agent.id, nameKey: agent.normalizedName, enabled: agent.enabled })) })
+      await api.session(challengeToken)
+      const registered = await api.register({ roomId, runId, turnLimit, runTurnsCompleted: 0, totalTurnsCompleted: 0, status: 'running', protocolTag: 'agentroom.v1', roster: agents.map((agent) => ({ agentId: agent.id, nameKey: agent.normalizedName, enabled: agent.enabled })) })
       const room: LocalRoom = { ...draft, status: 'running', controlRevision: registered.controlRevision, updatedAt: Date.now() }
       const run: LocalRun = { ...pausedRun, status: 'running' }
       await Promise.all([putRoom(room), putRun(run)])
       localStorage.setItem('agentroom:lastRoomId', roomId)
       navigate(`/room/${roomId}`)
     } catch (caught) {
-      setError(caught instanceof AgentRoomApiError ? `${caught.code}: ${caught.message}` : 'Could not start this room. Your draft remains on this device.')
+      if (caught instanceof AgentRoomApiError && caught.code === 'CHALLENGE_REQUIRED') {
+        const config = await api.config().catch(() => undefined)
+        setChallengeSiteKey(config?.turnstileSiteKey)
+        setError(config?.turnstileSiteKey ? undefined : 'Verification is required but unavailable. Please try again later.')
+      } else setError(caught instanceof AgentRoomApiError ? `${caught.code}: ${caught.message}` : 'Could not start this room. Your draft remains on this device.')
       setSubmitting(false)
     }
-  }
+  }, [agents, roomId, runId, submitting, title, topic, turnLimit, valid])
+  const submit = (event: FormEvent) => { event.preventDefault(); void startRoom() }
   return <main className="form-page"><AppLink to="/" className="back-link">← {t('back')}</AppLink><div className="page-intro"><p className="eyebrow">{t('roomSetup')}</p><h1>{t('newRoom')}</h1></div>
     <form onSubmit={(event) => void submit(event)}>
       <section className="form-section"><div className="field-grid"><label><span>{t('roomTitle')}</span><input autoFocus required maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)}/></label><label className="wide"><span>{t('topic')}</span><textarea required maxLength={4000} rows={4} value={topic} onChange={(event) => setTopic(event.target.value)}/></label></div></section>
@@ -89,6 +97,7 @@ function NewRoom({ t }: { t: ReturnType<typeof translator> }) {
       </section>
       <section className="form-section run-select"><h2>{t('runLength')}</h2><div className="segmented">{TURN_LIMITS.map((limit) => <button type="button" key={limit} className={turnLimit === limit ? 'selected' : ''} aria-pressed={turnLimit === limit} onClick={() => setTurnLimit(limit)}><strong>{limit}</strong><span>{t('turns')}</span></button>)}</div></section>
       {error && <p className="error-banner" role="alert">{error}</p>}
+      {challengeSiteKey && <div className="challenge-banner"><p>{t('challenge')}</p><TurnstileChallenge siteKey={challengeSiteKey} onToken={(token) => { setChallengeSiteKey(undefined); void startRoom(token) }} onError={() => setError('Verification could not load. Please retry.')}/></div>}
       <div className="form-actions"><p>{enabled.length}/6 {t('agents')}</p><button className="button primary large" disabled={!valid || submitting}>{submitting ? t('creating') : t('createStart')} <span>→</span></button></div>
     </form>
   </main>
@@ -163,7 +172,7 @@ function Settings({ t, language, setLanguage, theme, setTheme }: { t: ReturnType
 }
 
 function About({ t }: { t: ReturnType<typeof translator> }) {
-  return <main className="simple-page about-page"><p className="eyebrow">Open source · PUBLIC_BETA</p><h1>{t('about')}</h1><p className="about-lead">{t('aboutBody')}</p><div className="principles"><div><span>01</span><h2>{t('noSignup')}</h2><p>{t('anonymousExplain')}</p></div><div><span>02</span><h2>{t('localFirst')}</h2><p>{t('privacyText')}</p></div><div><span>03</span><h2>{t('sharedCapacity')}</h2><p>{t('capacityExplain')}</p></div></div><div className="about-actions"><a className="button primary" href="https://github.com/colasun/agent-room" target="_blank" rel="noopener noreferrer">{t('source')} ↗</a><a className="button secondary" href="https://github.com/colasun/agent-room#deploy-your-own" target="_blank" rel="noopener noreferrer">{t('deployOwn')} ↗</a></div></main>
+  return <main className="simple-page about-page"><p className="eyebrow">Open source · PUBLIC_BETA</p><h1>{t('about')}</h1><p className="about-lead">{t('aboutBody')}</p><div className="principles"><div><span>01</span><h2>{t('noSignup')}</h2><p>{t('anonymousExplain')}</p></div><div><span>02</span><h2>{t('localFirst')}</h2><p>{t('privacyText')}</p></div><div><span>03</span><h2>{t('sharedCapacity')}</h2><p>{t('capacityExplain')}</p></div></div><div className="about-actions"><a className="button primary" href="https://github.com/colasun-ai/agent-room" target="_blank" rel="noopener noreferrer">{t('source')} ↗</a><a className="button secondary" href="https://github.com/colasun-ai/agent-room#self-deploy" target="_blank" rel="noopener noreferrer">{t('deployOwn')} ↗</a></div></main>
 }
 
 export default function App() {

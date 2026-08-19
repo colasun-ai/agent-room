@@ -40,7 +40,10 @@ export function validateRegister(value: unknown): RegisterRoomRequest {
   })
   if (new Set(roster.map((entry) => entry.agentId)).size !== roster.length || new Set(roster.map((entry) => entry.nameKey)).size !== roster.length || roster.filter((entry) => entry.enabled).length < 2) throw new Error('unique')
   if (!isTurnLimit(data.turnLimit) || data.protocolTag !== PROTOCOL_TAG) throw new Error('protocol')
-  return { roomId: id(data.roomId), runId: id(data.runId), turnLimit: data.turnLimit, protocolTag: PROTOCOL_TAG, roster }
+  const runTurnsCompleted = Number(data.runTurnsCompleted), totalTurnsCompleted = Number(data.totalTurnsCompleted)
+  if (!Number.isInteger(runTurnsCompleted) || runTurnsCompleted < 0 || runTurnsCompleted > data.turnLimit || !Number.isInteger(totalTurnsCompleted) || totalTurnsCompleted < runTurnsCompleted) throw new Error('turns')
+  if (!['running', 'paused', 'finished'].includes(String(data.status)) || (data.status === 'finished') !== (runTurnsCompleted === data.turnLimit)) throw new Error('status')
+  return { roomId: id(data.roomId), runId: id(data.runId), turnLimit: data.turnLimit, runTurnsCompleted, totalTurnsCompleted, status: data.status as 'running' | 'paused' | 'finished', protocolTag: PROTOCOL_TAG, roster }
 }
 
 function validateAgent(value: unknown): AgentProfile {
@@ -76,6 +79,16 @@ export function validateTurn(value: unknown, pathRoomId: string): ValidatedTurnP
   const messages = messagesRaw.map(validateMessage)
   const profiles = new Map(agents.map((agent) => [agent.id, agent]))
   if (messages.some((message) => message.senderType === 'agent' && (!message.senderId || !profiles.has(message.senderId)))) throw new Error('senderProfile')
+  for (const message of messages) {
+    if (message.senderType === 'agent') {
+      const profile = profiles.get(message.senderId!)!
+      message.senderName = profile.name
+      message.senderRole = profile.role
+    } else {
+      message.senderName = 'User'
+      message.senderRole = undefined
+    }
+  }
   if (messages.reduce((sum, message) => sum + message.content.length, 0) > 50_000) throw new Error('content')
   const roomId = id(data.roomId)
   if (roomId !== pathRoomId || data.protocolTag !== PROTOCOL_TAG) throw new Error('protocol')
@@ -98,7 +111,7 @@ export function validateControl(value: unknown): ControlAction {
     return { action: 'continue', ...common, runId: id(data.runId), turnLimit: data.turnLimit }
   }
   if (data.action === 'update-roster') {
-    const validated = validateRegister({ roomId: 'placeholder', runId: 'placeholder', turnLimit: 6, protocolTag: PROTOCOL_TAG, roster: data.roster })
+    const validated = validateRegister({ roomId: 'placeholder', runId: 'placeholder', turnLimit: 6, runTurnsCompleted: 0, totalTurnsCompleted: 0, status: 'running', protocolTag: PROTOCOL_TAG, roster: data.roster })
     return { action: 'update-roster', ...common, roster: validated.roster }
   }
   throw new Error('action')

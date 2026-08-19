@@ -28,5 +28,6 @@ describe('NVIDIA SSE adapter', () => {
     const consume = async () => { for await (const event of provider.streamChat([], controller.signal)) void event }
     await expect(consume()).rejects.toMatchObject({ kind: 'aborted' })
     expect(observed).toBeInstanceOf(AbortSignal)
+    expect(observed?.aborted).toBe(true)
   })
 })

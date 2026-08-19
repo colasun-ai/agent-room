@@ -2,7 +2,7 @@ import { CONTROL_SCHEMA_REVISION, PROTOCOL_TAG, type ApiError, type ErrorCode, t
 import { buildPrompt } from './prompt'
 import { NvidiaProvider, ProviderError } from './provider'
 import { parseMentions } from './scheduler'
-import { hmac, issueSession, readSession, trustedRequest, withSecurity } from './security'
+import { hmac, issueSession, normalizeNetworkRiskSource, readSession, trustedRequest, withSecurity } from './security'
 import type { Env, SessionIdentity, TurnBeginResult } from './types'
 import { readJson, validateControl, validateRegister, validateSkip, validateTurn } from './validation'
 
@@ -32,8 +32,6 @@ async function requireSession(request: Request, env: Env): Promise<SessionIdenti
   const identity = await readSession(request, env.SESSION_HMAC_SECRET)
   if (!identity) return apiError('SESSION_REQUIRED', 401)
   if (identity.expiresAt <= Date.now()) return apiError('SESSION_EXPIRED', 401)
-  const checked = await controlCall(env, '/session/validate', { sessionId: identity.sessionId, now: Date.now() })
-  if (!checked.ok) return forwardControl(checked)
   return identity
 }
 
@@ -54,18 +52,31 @@ async function createSession(request: Request, env: Env): Promise<Response> {
   let body: { challengeToken?: unknown } = {}
   try { body = await readJson(request, 8_000) as typeof body } catch { return apiError('INVALID_REQUEST', 400) }
   const challengeToken = typeof body.challengeToken === 'string' ? body.challengeToken : undefined
+  const existing = await readSession(request, env.SESSION_HMAC_SECRET)
+  if (existing && existing.expiresAt > Date.now()) {
+    if (!challengeToken) {
+      const checked = await controlCall(env, '/session/exists', { sessionId: existing.sessionId, now: Date.now() })
+      if (checked.ok) return Response.json({ expiresAt: existing.expiresAt })
+    }
+    if (challengeToken) {
+      if (!(await verifyTurnstile(challengeToken, request, env))) return apiError('CHALLENGE_REQUIRED', 403)
+      const challengeHash = await hmac(env.RISK_HMAC_SECRET ?? env.SESSION_HMAC_SECRET, challengeToken)
+      const verified = await controlCall(env, '/session/verify', { sessionId: existing.sessionId, challengeHash, now: Date.now() })
+      return verified.ok ? Response.json({ expiresAt: existing.expiresAt }) : forwardControl(verified)
+    }
+  }
   let challengeHash: string | undefined
   if (challengeToken) {
     if (!(await verifyTurnstile(challengeToken, request, env))) return apiError('CHALLENGE_REQUIRED', 403)
     challengeHash = await hmac(env.RISK_HMAC_SECRET ?? env.SESSION_HMAC_SECRET, challengeToken)
   }
   const now = Date.now(), sessionId = crypto.randomUUID(), expiresAt = now + 24 * 60 * 60_000
-  const rawNetwork = request.headers.get('cf-connecting-ip') ?? 'unknown'
-  const riskKey = await hmac(env.RISK_HMAC_SECRET ?? env.SESSION_HMAC_SECRET, rawNetwork)
+  const networkSource = normalizeNetworkRiskSource(request.headers.get('cf-connecting-ip'))
+  const riskKey = await hmac(env.RISK_HMAC_SECRET ?? env.SESSION_HMAC_SECRET, networkSource)
   const created = await controlCall(env, '/session/create', { sessionId, riskKey, now, expiresAt, idleExpiresAt: now + 2 * 60 * 60_000, challengeHash })
   if (!created.ok) return forwardControl(created)
   const cookie = await issueSession({ sessionId, expiresAt }, env.SESSION_HMAC_SECRET)
-  return new Response(null, { status: 204, headers: { 'set-cookie': `ar_session=${cookie}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Strict` } })
+  return Response.json({ expiresAt }, { headers: { 'set-cookie': `ar_session=${cookie}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Strict` } })
 }
 
 async function config(env: Env): Promise<Response> {
@@ -164,8 +175,9 @@ async function turn(request: Request, env: Env, session: SessionIdentity, roomId
               const mentions = parseMentions(fullOutput, roster, begun.speakerId)
               const finished = await controlCall(env, '/turn/finish', { sessionId: session.sessionId, roomId, leaseId: begun.leaseId, serverTurnId: begun.serverTurnId, mentions, now: Date.now() })
               if (!finished.ok) { send({ type: 'error', requestId: payload.requestId, serverTurnId: begun.serverTurnId, code: 'SERVICE_ERROR', retryable: false }); return }
+              const completion = await finished.json<{ controlRevision: number; runTurnsCompleted: number; totalTurnsCompleted: number }>()
               committed = true
-              send({ type: 'done', requestId: payload.requestId, serverTurnId: begun.serverTurnId, actualModel: env.DEFAULT_MODEL, durationMs: Date.now() - startedAt, ...(usage ? { usage } : {}) })
+              send({ type: 'done', requestId: payload.requestId, serverTurnId: begun.serverTurnId, actualModel: env.DEFAULT_MODEL, durationMs: Date.now() - startedAt, ...completion, ...(usage ? { usage } : {}) })
               return
             } catch (caught) {
               const error = caught instanceof ProviderError ? caught : new ProviderError('unavailable', undefined, undefined, !visible)

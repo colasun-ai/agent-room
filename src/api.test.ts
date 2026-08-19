@@ -21,7 +21,7 @@ describe('turn stream protocol', () => {
       `event: queued\ndata: ${JSON.stringify({ type: 'queued', requestId: id, serverTurnId: 'st-1', queueState: 'short' })}\n\n`,
       `event: start\ndata: ${JSON.stringify({ type: 'start', requestId: id, serverTurnId: 'st-1', serverChosenAgentId: 'maya', actualModel: 'server-model', protocolTag: PROTOCOL_TAG })}\n\n`,
       `event: content\ndata: ${JSON.stringify({ type: 'content', requestId: id, serverTurnId: 'st-1', delta: 'Hi' })}\n\n`,
-      `event: done\ndata: ${JSON.stringify({ type: 'done', requestId: id, serverTurnId: 'st-1', actualModel: 'server-model', durationMs: 12 })}\n\n`,
+      `event: done\ndata: ${JSON.stringify({ type: 'done', requestId: id, serverTurnId: 'st-1', actualModel: 'server-model', durationMs: 12, controlRevision: 2, runTurnsCompleted: 1, totalTurnsCompleted: 1 })}\n\n`,
     ])))
     const types: string[] = []
     await streamTurn('room', request, new AbortController().signal, (event) => { types.push(event.type) })

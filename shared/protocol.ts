@@ -55,6 +55,9 @@ export interface RegisterRoomRequest {
   roomId: string
   runId: string
   turnLimit: TurnLimit
+  runTurnsCompleted: number
+  totalTurnsCompleted: number
+  status: RoomStatus
   protocolTag: typeof PROTOCOL_TAG
   roster: Array<{ agentId: string; nameKey: string; enabled: boolean }>
 }
@@ -112,7 +115,7 @@ export type StreamEvent =
   | { type: 'queued'; requestId: string; serverTurnId: string; queueState: 'short' | 'busy' }
   | { type: 'start'; requestId: string; serverTurnId: string; serverChosenAgentId: string; actualModel: string; protocolTag: typeof PROTOCOL_TAG }
   | { type: 'content'; requestId: string; serverTurnId: string; delta: string }
-  | { type: 'done'; requestId: string; serverTurnId: string; actualModel: string; durationMs: number; usage?: { inputTokens?: number; outputTokens?: number } }
+  | { type: 'done'; requestId: string; serverTurnId: string; actualModel: string; durationMs: number; controlRevision: number; runTurnsCompleted: number; totalTurnsCompleted: number; usage?: { inputTokens?: number; outputTokens?: number } }
   | { type: 'error'; requestId: string; serverTurnId?: string; code: ErrorCode; retryable: boolean; retryAfterMs?: number }
 
 export interface ApiError {
@@ -126,4 +129,3 @@ export function normalizeAgentName(name: string): string {
 export function isTurnLimit(value: unknown): value is TurnLimit {
   return TURN_LIMITS.includes(value as TurnLimit)
 }
-

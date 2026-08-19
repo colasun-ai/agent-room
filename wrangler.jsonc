@@ -9,7 +9,7 @@
   "observability": { "enabled": true, "head_sampling_rate": 0.1 },
   "vars": {
     "ENVIRONMENT": "production",
-    "AI_ENABLED": "true",
+    "AI_ENABLED": "false",
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     "DEFAULT_MODEL": "z-ai/glm-5.2",
     "PUBLIC_ORIGIN": "https://agent-room.colasun-ai.workers.dev",

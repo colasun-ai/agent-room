@@ -19,6 +19,42 @@ export async function hmac(secret: string, value: string): Promise<string> {
   return base64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value))))
 }
 
+function expandIpv6(value: string): number[] | undefined {
+  const address = value.split('%', 1)[0].toLowerCase()
+  if (!address.includes(':') || address.indexOf('::') !== address.lastIndexOf('::')) return undefined
+  const [leftRaw, rightRaw = ''] = address.split('::')
+  const parseSide = (side: string): number[] | undefined => {
+    if (!side) return []
+    const result: number[] = []
+    for (const part of side.split(':')) {
+      if (/^[0-9a-f]{1,4}$/.test(part)) result.push(Number.parseInt(part, 16))
+      else if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(part)) {
+        const octets = part.split('.').map(Number)
+        if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return undefined
+        result.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3])
+      } else return undefined
+    }
+    return result
+  }
+  const left = parseSide(leftRaw), right = parseSide(rightRaw)
+  if (!left || !right) return undefined
+  const missing = 8 - left.length - right.length
+  if ((address.includes('::') && missing < 1) || (!address.includes('::') && missing !== 0)) return undefined
+  return [...left, ...Array.from({ length: missing }, () => 0), ...right]
+}
+
+/** Canonicalize IPv6 to a /64 so address rotation cannot evade network risk controls. */
+export function normalizeNetworkRiskSource(value: string | null): string {
+  const raw = value?.trim() ?? ''
+  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(raw)) {
+    const octets = raw.split('.').map(Number)
+    if (octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)) return `ipv4:${octets.join('.')}`
+  }
+  const ipv6 = expandIpv6(raw)
+  if (ipv6) return `ipv6:${ipv6.slice(0, 4).map((part) => part.toString(16)).join(':')}::/64`
+  return 'network:unknown'
+}
+
 async function verifyHmac(secret: string, value: string, signature: string): Promise<boolean> {
   try {
     const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])

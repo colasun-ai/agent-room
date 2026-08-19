@@ -5,6 +5,7 @@ export class RoomCoordinator {
   private releaseLock?: () => void
   private readonly source = crypto.randomUUID()
   private driver = false
+  private closed = false
 
   constructor(private roomId: string, private onMessage: (message: CoordinationMessage) => void) {
     if ('BroadcastChannel' in window) {
@@ -17,7 +18,7 @@ export class RoomCoordinator {
     if (!navigator.locks) { this.driver = true; this.broadcast('driver'); return true }
     return new Promise<boolean>((resolve) => {
       void navigator.locks.request(`agentroom:${this.roomId}`, { ifAvailable: true }, async (lock) => {
-        if (!lock) { resolve(false); return }
+        if (!lock || this.closed) { resolve(false); return }
         this.driver = true; this.broadcast('driver'); resolve(true)
         await new Promise<void>((release) => { this.releaseLock = release })
         this.driver = false
@@ -28,5 +29,5 @@ export class RoomCoordinator {
   isDriver(): boolean { return this.driver }
   changed(): void { this.broadcast('changed') }
   private broadcast(type: CoordinationMessage['type']): void { this.channel?.postMessage({ type, roomId: this.roomId, source: this.source } satisfies CoordinationMessage) }
-  close(): void { this.releaseLock?.(); this.channel?.close() }
+  close(): void { this.closed = true; this.releaseLock?.(); this.channel?.close() }
 }

@@ -64,11 +64,26 @@ describe('Worker HTTP integration', () => {
     const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ success: true, hostname: 'app.test', action: 'agentroom-session' }))
     try {
       const response = await handleRequest(new Request('https://worker.test/api/session', { method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json', 'cf-connecting-ip': '192.0.2.1' }, body: JSON.stringify({ challengeToken: 'single-use-token' }) }), env)
-      expect(response.status).toBe(204)
+      expect(response.status).toBe(200)
       expect(response.headers.get('set-cookie')).toContain('HttpOnly')
       expect(createBody?.challengeHash).toEqual(expect.any(String))
       expect(JSON.stringify(createBody)).not.toContain('single-use-token')
     } finally { upstream.mockRestore() }
+  })
+
+  it('silently replaces a signed cookie whose durable session has expired', async () => {
+    const paths: string[] = []
+    const env = environment(async (request) => {
+      const path = new URL(request.url).pathname; paths.push(path)
+      if (path === '/session/exists') return Response.json({ error: { code: 'SESSION_EXPIRED' } }, { status: 401 })
+      if (path === '/session/create') return Response.json({ ok: true })
+      return Response.json({})
+    })
+    const oldCookie = await issueSession({ sessionId: 'expired-session', expiresAt: Date.now() + 60 * 60_000 }, env.SESSION_HMAC_SECRET)
+    const response = await handleRequest(new Request('https://worker.test/api/session', { method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, cookie: `ar_session=${oldCookie}`, 'content-type': 'application/json', 'cf-connecting-ip': '2001:db8::1' }, body: '{}' }), env)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('set-cookie')).toContain('ar_session=')
+    expect(paths).toEqual(['/session/exists', '/session/create'])
   })
 
   it('streams normalized queued/start/content/done and commits control metadata', async () => {
@@ -78,6 +93,7 @@ describe('Worker HTTP integration', () => {
       if (path === '/session/validate') return Response.json({ ok: true })
       if (path === '/turn/begin') return Response.json({ serverTurnId: '11111111-1111-4111-8111-111111111111', leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, expiresAt: Date.now() + 1000 })
       if (path === '/quota/acquire') return Response.json({ leaseId: 'quota-lease', expiresAt: Date.now() + 1000, queueState: 'short' })
+      if (path === '/turn/finish') return Response.json({ controlRevision: 2, runTurnsCompleted: 1, totalTurnsCompleted: 1 })
       return Response.json({ ok: true })
     })
     const cookie = await issueSession({ sessionId: 'session-id', expiresAt: Date.now() + 60_000 }, env.SESSION_HMAC_SECRET)
@@ -96,8 +112,9 @@ describe('Worker HTTP integration', () => {
     expect(stream).toContain('event: start')
     expect(stream).toContain('Mock response.')
     expect(stream).toContain('event: done')
+    expect(stream).toContain('"controlRevision":2')
     expect(stream).not.toContain(env.SESSION_HMAC_SECRET)
-    expect(paths).toEqual(expect.arrayContaining(['/session/validate', '/turn/begin', '/quota/acquire', '/quota/release', '/turn/finish']))
+    expect(paths).toEqual(expect.arrayContaining(['/turn/begin', '/quota/acquire', '/quota/release', '/turn/finish']))
   })
 
   it('charges a fresh permit for the one allowed pre-token transient retry', async () => {
@@ -107,6 +124,7 @@ describe('Worker HTTP integration', () => {
       if (path === '/session/validate') return Response.json({ ok: true })
       if (path === '/turn/begin') return Response.json({ serverTurnId: '11111111-1111-4111-8111-111111111111', leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, expiresAt: Date.now() + 1000 })
       if (path === '/quota/acquire') return Response.json({ leaseId: `quota-${paths.filter((item) => item === path).length}`, expiresAt: Date.now() + 1000 })
+      if (path === '/turn/finish') return Response.json({ controlRevision: 2, runTurnsCompleted: 1, totalTurnsCompleted: 1 })
       return Response.json({ ok: true })
     })
     env.MOCK_UPSTREAM = 'false'; env.NVIDIA_API_KEY = 'not-a-real-key'

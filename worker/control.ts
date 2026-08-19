@@ -34,6 +34,9 @@ export class ControlPlane extends DurableObject<Env> {
     sql.exec(`CREATE TABLE IF NOT EXISTS permits (lease_id TEXT PRIMARY KEY, server_turn_id TEXT NOT NULL, session_id TEXT NOT NULL, room_id TEXT NOT NULL, expires_at INTEGER NOT NULL)`)
     sql.exec(`CREATE TABLE IF NOT EXISTS room_pacing (room_id TEXT PRIMARY KEY, last_attempt_at INTEGER NOT NULL)`)
     sql.exec(`CREATE TABLE IF NOT EXISTS challenge_tokens (token_hash TEXT PRIMARY KEY, used_at INTEGER NOT NULL)`)
+    sql.exec(`CREATE TABLE IF NOT EXISTS control_events (session_id TEXT NOT NULL, risk_key TEXT NOT NULL, at INTEGER NOT NULL)`)
+    sql.exec(`CREATE INDEX IF NOT EXISTS control_events_session ON control_events(session_id, at)`)
+    sql.exec(`CREATE INDEX IF NOT EXISTS control_events_risk ON control_events(risk_key, at)`)
     sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`)
   }
 
@@ -46,9 +49,11 @@ export class ControlPlane extends DurableObject<Env> {
   }
 
   private validSession(sessionId: string, now: number, touch = true): boolean {
-    const row = this.one('SELECT expires_at, idle_expires_at FROM sessions WHERE session_id = ?', sessionId)
+    const row = this.one('SELECT expires_at, idle_expires_at, last_seen FROM sessions WHERE session_id = ?', sessionId)
     if (!row || Number(row.expires_at) <= now || Number(row.idle_expires_at) <= now) return false
-    if (touch) this.ctx.storage.sql.exec('UPDATE sessions SET idle_expires_at = ?, last_seen = ? WHERE session_id = ?', Math.min(Number(row.expires_at), now + 2 * 60 * 60_000), now, sessionId)
+    if (touch && Number(row.last_seen) <= now - 5 * 60_000) {
+      this.ctx.storage.sql.exec('UPDATE sessions SET idle_expires_at = ?, last_seen = ? WHERE session_id = ?', Math.min(Number(row.expires_at), now + 2 * 60 * 60_000), now, sessionId)
+    }
     return true
   }
 
@@ -67,12 +72,45 @@ export class ControlPlane extends DurableObject<Env> {
     return room?.sessionId === sessionId ? room : undefined
   }
 
+  private hasOtherRunningRoom(sessionId: string, roomId: string, now: number): boolean {
+    return this.rows('SELECT room_id,data,expires_at FROM rooms WHERE session_id=? AND room_id<>? AND expires_at>?', sessionId, roomId, now)
+      .some((row) => (JSON.parse(String(row.data)) as RoomRecord).status === 'running')
+  }
+
+  private activeTurnIdempotency(scope: string, serverTurnId: string): { key: string; choice?: SpeakerChoice; speakerId?: string } | undefined {
+    for (const row of this.rows('SELECT key,data FROM idempotency WHERE scope=? AND status=?', scope, 'active')) {
+      const data = JSON.parse(String(row.data)) as { serverTurnId?: string; choice?: SpeakerChoice; speakerId?: string }
+      if (data.serverTurnId === serverTurnId) return { key: String(row.key), choice: data.choice, speakerId: data.speakerId }
+    }
+    return undefined
+  }
+
+  private controlWriteGate(sessionId: string, now: number): Response | undefined {
+    const session = this.one('SELECT risk_key,verified_until FROM sessions WHERE session_id=?', sessionId)
+    if (!session) return this.error('SESSION_EXPIRED', 401)
+    const perMinute = Number(this.one('SELECT COUNT(*) count FROM control_events WHERE session_id=? AND at>?', sessionId, now - 60_000)?.count ?? 0)
+    const perDay = Number(this.one('SELECT COUNT(*) count FROM control_events WHERE session_id=? AND at>?', sessionId, now - 24 * 60 * 60_000)?.count ?? 0)
+    const networkMinute = Number(this.one('SELECT COUNT(*) count FROM control_events WHERE risk_key=? AND at>?', String(session.risk_key), now - 60_000)?.count ?? 0)
+    const verified = Number(session.verified_until) > now
+    if (perMinute >= (verified ? 60 : 30) || perDay >= (verified ? 1000 : 500) || networkMinute >= 240) {
+      return this.error(verified ? 'RATE_LIMITED' : 'CHALLENGE_REQUIRED', verified ? 429 : 403, 60_000)
+    }
+    this.ctx.storage.sql.exec('INSERT INTO control_events(session_id,risk_key,at) VALUES(?,?,?)', sessionId, String(session.risk_key), now)
+    return undefined
+  }
+
   private cleanup(now: number): void {
     const sql = this.ctx.storage.sql
     sql.exec('DELETE FROM attempts WHERE at <= ?', now - 2 * 24 * 60 * 60_000)
     sql.exec('DELETE FROM permits WHERE expires_at <= ?', now)
     sql.exec('DELETE FROM idempotency WHERE expires_at <= ?', now)
     sql.exec('DELETE FROM risk_events WHERE at <= ?', now - 60 * 60_000)
+    sql.exec('DELETE FROM sessions WHERE expires_at <= ? OR idle_expires_at <= ?', now, now)
+    sql.exec('DELETE FROM rooms WHERE session_id NOT IN (SELECT session_id FROM sessions)')
+    sql.exec('DELETE FROM rooms WHERE expires_at <= ?', now)
+    sql.exec('DELETE FROM challenge_tokens WHERE used_at <= ?', now - 10 * 60_000)
+    sql.exec('DELETE FROM control_events WHERE at <= ?', now - 24 * 60 * 60_000)
+    sql.exec('DELETE FROM room_pacing WHERE room_id NOT IN (SELECT room_id FROM rooms)')
   }
 
   private error(code: string, status: number, retryAfterMs?: number): Response {
@@ -84,7 +122,8 @@ export class ControlPlane extends DurableObject<Env> {
     const body = request.method === 'GET' ? {} : await request.json<Record<string, unknown>>().catch(() => ({}))
     try {
       if (url.pathname === '/session/create') return this.createSession(body)
-      if (url.pathname === '/session/validate') return this.validateSession(body)
+      if (url.pathname === '/session/exists') return this.sessionExists(body)
+      if (url.pathname === '/session/verify') return this.verifySession(body)
       if (url.pathname === '/rooms/register') return this.registerRoom(body)
       if (url.pathname === '/rooms/control') return this.controlRoom(body)
       if (url.pathname === '/rooms/skip') return this.skipRoom(body)
@@ -119,8 +158,19 @@ export class ControlPlane extends DurableObject<Env> {
     return json({ ok: true })
   }
 
-  private validateSession(body: Record<string, unknown>): Response {
-    return this.validSession(String(body.sessionId ?? ''), Number(body.now)) ? json({ ok: true }) : this.error('SESSION_EXPIRED', 401)
+  private sessionExists(body: Record<string, unknown>): Response {
+    return this.validSession(String(body.sessionId ?? ''), Number(body.now), false) ? json({ exists: true }) : this.error('SESSION_EXPIRED', 401)
+  }
+
+  private verifySession(body: Record<string, unknown>): Response {
+    const sessionId = String(body.sessionId ?? ''), challengeHash = String(body.challengeHash ?? ''), now = Number(body.now)
+    if (!this.validSession(sessionId, now) || !challengeHash) return this.error('SESSION_EXPIRED', 401)
+    if (this.one('SELECT token_hash FROM challenge_tokens WHERE token_hash=?', challengeHash)) return this.error('CHALLENGE_REQUIRED', 403)
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('INSERT INTO challenge_tokens(token_hash,used_at) VALUES(?,?)', challengeHash, now)
+      this.ctx.storage.sql.exec('UPDATE sessions SET verified_until=? WHERE session_id=?', now + 60 * 60_000, sessionId)
+    })
+    return json({ ok: true, verifiedUntil: now + 60 * 60_000 })
   }
 
   private registerRoom(body: Record<string, unknown>): Response {
@@ -130,10 +180,15 @@ export class ControlPlane extends DurableObject<Env> {
     const existing = this.readRoom(String(body.roomId))
     if (existing && existing.sessionId !== sessionId) return this.error('ROOM_NOT_REGISTERED', 404)
     if (existing) return json({ roomId: existing.roomId, runId: existing.activeRunId, controlRevision: existing.controlRevision, expiresAt: existing.expiresAt })
+    const roomCount = Number(this.one('SELECT COUNT(*) count FROM rooms WHERE session_id=? AND expires_at>?', sessionId, now)?.count ?? 0)
+    if (roomCount >= 20) return this.error('RATE_LIMITED', 429, 60_000)
+    const writeGate = this.controlWriteGate(sessionId, now)
+    if (writeGate) return writeGate
+    if (this.hasOtherRunningRoom(sessionId, String(body.roomId), now)) return this.error('ROOM_BUSY', 409)
     const roster = body.roster as RoomRecord['roster']
     const room: RoomRecord = {
-      roomId: String(body.roomId), sessionId, roster, cursorIndex: 0, activeRunId: String(body.runId), runTurnLimit: Number(body.turnLimit), runTurnsCompleted: 0,
-      totalTurnsCompleted: 0, status: 'running', lastAcceptedMentions: [], fairness: initialFairness(roster), controlRevision: 1, failedTurns: {}, expiresAt: now + 12 * 60 * 60_000, updatedAt: now,
+      roomId: String(body.roomId), sessionId, roster, cursorIndex: 0, activeRunId: String(body.runId), runTurnLimit: Number(body.turnLimit), runTurnsCompleted: Number(body.runTurnsCompleted ?? 0),
+      totalTurnsCompleted: Number(body.totalTurnsCompleted ?? 0), status: String(body.status ?? 'running') as RoomRecord['status'], lastAcceptedMentions: [], fairness: initialFairness(roster), controlRevision: 1, failedTurns: {}, expiresAt: now + 12 * 60 * 60_000, updatedAt: now,
     }
     this.writeRoom(room)
     return json({ roomId: room.roomId, runId: room.activeRunId, controlRevision: room.controlRevision, expiresAt: room.expiresAt })
@@ -147,8 +202,11 @@ export class ControlPlane extends DurableObject<Env> {
     const key = String(body.idempotencyKey), scope = `${sessionId}:${roomId}:control`
     const cached = this.one('SELECT data FROM idempotency WHERE scope=? AND key=? AND expires_at>?', scope, key, now)
     if (cached) return json(JSON.parse(String(cached.data)))
+    const writeGate = this.controlWriteGate(sessionId, now)
+    if (writeGate) return writeGate
     if (Number(body.controlRevision) !== room.controlRevision) return this.error('INVALID_REQUEST', 409)
     if (room.activeLease && room.activeLease.expiresAt > now) return this.error('ROOM_BUSY', 409)
+    if ((body.action === 'resume' || body.action === 'continue') && this.hasOtherRunningRoom(sessionId, roomId, now)) return this.error('ROOM_BUSY', 409)
     let updated: RoomRecord
     try { updated = transitionControl(room, body as never, now) }
     catch (error) {
@@ -170,6 +228,8 @@ export class ControlPlane extends DurableObject<Env> {
     if (!room) return this.error('ROOM_NOT_REGISTERED', 404)
     const scope = `${sessionId}:${roomId}:skip`, cached = this.one('SELECT data FROM idempotency WHERE scope=? AND key=? AND expires_at>?', scope, key, now)
     if (cached) return json(JSON.parse(String(cached.data)))
+    const writeGate = this.controlWriteGate(sessionId, now)
+    if (writeGate) return writeGate
     if (Number(body.controlRevision) !== room.controlRevision) return this.error('INVALID_REQUEST', 409)
     if (room.status !== 'running') return this.error(room.status === 'finished' ? 'RUN_COMPLETE' : 'ROOM_BUSY', 409)
     if (room.activeLease && room.activeLease.expiresAt > now) return this.error('ROOM_BUSY', 409)
@@ -198,7 +258,12 @@ export class ControlPlane extends DurableObject<Env> {
     if (body.runId !== room.activeRunId) return this.error('INVALID_REQUEST', 409)
     if (room.runTurnsCompleted >= room.runTurnLimit || room.status === 'finished') return this.error('RUN_COMPLETE', 409)
     if (room.status !== 'running') return this.error('ROOM_BUSY', 409)
+    if (this.hasOtherRunningRoom(sessionId, roomId, now)) return this.error('ROOM_BUSY', 409)
     if (room.activeLease && room.activeLease.expiresAt > now) return this.error('ROOM_BUSY', 409)
+    if (room.activeLease && room.activeLease.expiresAt <= now) {
+      this.ctx.storage.sql.exec('UPDATE idempotency SET status=? WHERE scope=? AND status=?', 'error', scope, 'active')
+      room.activeLease = undefined
+    }
     const retrySpeaker = body.retryOfServerTurnId ? room.failedTurns[body.retryOfServerTurnId] : undefined
     if (body.retryOfServerTurnId && !retrySpeaker) return this.error('INVALID_REQUEST', 400)
     const choice = chooseSpeaker(room, body.latestUserDirectAddress, retrySpeaker)
@@ -217,15 +282,14 @@ export class ControlPlane extends DurableObject<Env> {
     if (!room) return this.error('ROOM_NOT_REGISTERED', 404)
     if (!room.activeLease || room.activeLease.leaseId !== body.leaseId || room.activeLease.serverTurnId !== body.serverTurnId) return this.error('ROOM_BUSY', 409)
     const scope = `${room.sessionId}:${room.roomId}:turn`
-    const idem = this.one('SELECT key,data FROM idempotency WHERE scope=? AND status=?', scope, 'active')
-    if (!idem) return this.error('SERVICE_ERROR', 500)
-    const stored = JSON.parse(String(idem.data)) as { choice: SpeakerChoice }
-    const updated = advanceAfterCompletion(room, stored.choice, Array.isArray(body.mentions) ? body.mentions.map(String) : [])
+    const idem = this.activeTurnIdempotency(scope, String(body.serverTurnId))
+    if (!idem?.choice) return this.error('SERVICE_ERROR', 500)
+    const updated = advanceAfterCompletion(room, idem.choice, Array.isArray(body.mentions) ? body.mentions.map(String) : [])
     updated.updatedAt = now; updated.expiresAt = now + 12 * 60 * 60_000; updated.failedTurns = {}
     const result = { controlRevision: updated.controlRevision, runTurnsCompleted: updated.runTurnsCompleted, totalTurnsCompleted: updated.totalTurnsCompleted }
     this.ctx.storage.transactionSync(() => {
       this.writeRoom(updated)
-      this.ctx.storage.sql.exec('UPDATE idempotency SET status=?,data=? WHERE scope=? AND key=?', 'done', JSON.stringify(result), scope, String(idem.key))
+      this.ctx.storage.sql.exec('UPDATE idempotency SET status=?,data=? WHERE scope=? AND key=?', 'done', JSON.stringify(result), scope, idem.key)
     })
     return json(result)
   }
@@ -236,13 +300,12 @@ export class ControlPlane extends DurableObject<Env> {
     const activeLease = room.activeLease
     if (activeLease && activeLease.leaseId === body.leaseId && activeLease.serverTurnId === body.serverTurnId) {
       const scope = `${room.sessionId}:${room.roomId}:turn`
-      const idem = this.one('SELECT key,data FROM idempotency WHERE scope=? AND status=?', scope, 'active')
-      const stored = idem ? JSON.parse(String(idem.data)) as { speakerId: string } : undefined
-      if (stored) room.failedTurns[String(body.serverTurnId)] = stored.speakerId
+      const idem = this.activeTurnIdempotency(scope, String(body.serverTurnId))
+      if (idem?.speakerId) room.failedTurns[String(body.serverTurnId)] = idem.speakerId
       room.activeLease = undefined; room.updatedAt = Number(body.now)
       this.ctx.storage.transactionSync(() => {
         this.writeRoom(room)
-        if (idem) this.ctx.storage.sql.exec('UPDATE idempotency SET status=? WHERE scope=? AND key=?', 'error', scope, String(idem.key))
+        if (idem) this.ctx.storage.sql.exec('UPDATE idempotency SET status=? WHERE scope=? AND key=?', 'error', scope, idem.key)
       })
     }
     return json({ ok: true })
@@ -250,6 +313,7 @@ export class ControlPlane extends DurableObject<Env> {
 
   private acquire(request: Request, payload: AcquirePayload): Promise<Response> | Response {
     if (!this.validSession(payload.sessionId, payload.now)) return this.error('SESSION_EXPIRED', 401)
+    if (this.hasOtherRunningRoom(payload.sessionId, payload.roomId, payload.now)) return this.error('ROOM_BUSY', 409)
     return new Promise<Response>((resolve) => {
       const waiting: Waiting = { payload, resolve, expiresAt: Date.now() + 40_000, aborted: false }
       const ticketId = crypto.randomUUID()
@@ -327,7 +391,11 @@ export class ControlPlane extends DurableObject<Env> {
   }
 
   private setCooldown(body: Record<string, unknown>): Response {
-    const until = Math.max(Date.now() + 5_000, Math.min(Date.now() + 15 * 60_000, Number(body.until)))
+    const now = Date.now()
+    const current = Number(this.one("SELECT value FROM meta WHERE key='cooldown_until'")?.value ?? 0)
+    const candidate = Number(body.until)
+    const requested = Number.isFinite(candidate) ? Math.max(now + 5_000, candidate) : now + 30_000
+    const until = Math.max(current, requested)
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO meta(key,value) VALUES('cooldown_until',?)", String(until))
     return json({ ok: true, until })
   }

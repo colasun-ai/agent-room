@@ -78,9 +78,10 @@ function timeoutSignal(ms: number, parent: AbortSignal): { signal: AbortSignal; 
   const controller = new AbortController()
   let timeout = false
   const abort = () => controller.abort(parent.reason)
-  parent.addEventListener('abort', abort, { once: true })
+  if (parent.aborted) abort()
+  else parent.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => { timeout = true; controller.abort(new Error('timeout')) }, ms)
-  return { signal: controller.signal, clear: () => { clearTimeout(timer) }, timedOut: () => timeout }
+  return { signal: controller.signal, clear: () => { clearTimeout(timer); parent.removeEventListener('abort', abort) }, timedOut: () => timeout }
 }
 
 export class NvidiaProvider {

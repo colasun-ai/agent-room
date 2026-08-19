@@ -8,11 +8,15 @@ import type { LocalAgent, LocalMessage, LocalRoom, LocalRun, RoomBundle } from '
 
 function activeRun(bundle: RoomBundle): LocalRun | undefined { return bundle.runs.find((run) => run.id === bundle.room.activeRunId) }
 
+function controlExpired(error: unknown): error is AgentRoomApiError {
+  return error instanceof AgentRoomApiError && ['SESSION_REQUIRED', 'SESSION_EXPIRED', 'ROOM_NOT_REGISTERED'].includes(error.code)
+}
+
 function registration(bundle: RoomBundle): RegisterRoomRequest {
   const run = activeRun(bundle)
   if (!run) throw new Error('No active run')
   return {
-    roomId: bundle.room.id, runId: run.id, turnLimit: run.turnLimit, protocolTag: PROTOCOL_TAG,
+    roomId: bundle.room.id, runId: run.id, turnLimit: run.turnLimit, runTurnsCompleted: run.turnsCompleted, totalTurnsCompleted: bundle.room.totalTurnsCompleted, status: bundle.room.status === 'draft' ? 'paused' : bundle.room.status, protocolTag: PROTOCOL_TAG,
     roster: bundle.agents.map((agent) => ({ agentId: agent.id, nameKey: agent.normalizedName, enabled: agent.enabled })),
   }
 }
@@ -45,18 +49,26 @@ export function useRoomController(roomId: string) {
 
   useEffect(() => {
     let disposed = false
+    let retryTimer: number | undefined
     void Promise.resolve().then(refresh)
     const roomCoordinator = new RoomCoordinator(roomId, () => void refresh())
     coordinator.current = roomCoordinator
-    void roomCoordinator.acquire().then((acquired) => { if (!disposed) setDriver(acquired) })
-    return () => { disposed = true; activeRequest.current?.controller.abort(); roomCoordinator.close() }
+    const acquireDriver = async () => {
+      const acquired = await roomCoordinator.acquire()
+      if (disposed) return
+      setDriver(acquired)
+      if (!acquired) retryTimer = window.setTimeout(() => void acquireDriver(), 500)
+    }
+    void acquireDriver()
+    return () => { disposed = true; if (retryTimer) window.clearTimeout(retryTimer); activeRequest.current?.controller.abort(); roomCoordinator.close() }
   }, [refresh, roomId])
 
   const commitBundle = useCallback((updater: (current: RoomBundle) => RoomBundle) => {
-    setBundle((current) => {
-      if (!current) return current
-      const next = updater(current); bundleRef.current = next; return next
-    })
+    const current = bundleRef.current
+    if (!current) return
+    const next = updater(current)
+    bundleRef.current = next
+    setBundle(next)
     coordinator.current?.changed()
   }, [])
 
@@ -127,9 +139,9 @@ export function useRoomController(roomId: string) {
           completed = true
           message = { ...message, status: 'completed', mentions: parseMentions(message.content, current.agents), updatedAt: Date.now() }
           await writer.finish(message)
-          const nextTurns = run.turnsCompleted + 1
+          const nextTurns = event.runTurnsCompleted
           const nextRun: LocalRun = { ...run, turnsCompleted: nextTurns, status: nextTurns >= run.turnLimit ? 'finished' : 'running', ...(nextTurns >= run.turnLimit ? { finishedAt: Date.now() } : {}) }
-          const nextRoom: LocalRoom = { ...current.room, status: nextTurns >= run.turnLimit ? 'finished' : (bundleRef.current?.room.status === 'paused' ? 'paused' : 'running'), totalTurnsCompleted: current.room.totalTurnsCompleted + 1, updatedAt: Date.now() }
+          const nextRoom: LocalRoom = { ...current.room, status: nextTurns >= run.turnLimit ? 'finished' : (bundleRef.current?.room.status === 'paused' ? 'paused' : 'running'), controlRevision: event.controlRevision, totalTurnsCompleted: event.totalTurnsCompleted, updatedAt: Date.now() }
           await Promise.all([putRun(nextRun), putRoom(nextRoom)])
           commitBundle((value) => ({ ...value, room: nextRoom, runs: value.runs.map((item) => item.id === run.id ? nextRun : item), messages: value.messages.map((item) => item.id === messageId ? message : item) }))
         } else if (event.type === 'error') {
@@ -146,7 +158,8 @@ export function useRoomController(roomId: string) {
       }
       await writer.finish(message)
       const latest = bundleRef.current
-      const failedRoom = latest ? { ...latest.room, status: 'paused' as const, updatedAt: Date.now() } : undefined
+      const expired = controlExpired(apiError)
+      const failedRoom = latest ? { ...latest.room, status: 'paused' as const, ...(expired ? { controlRevision: undefined } : {}), updatedAt: Date.now() } : undefined
       const failedRun = latest && failedRoom ? activeRun(latest) : undefined
       const pausedRun = failedRun ? { ...failedRun, status: 'paused' as const } : undefined
       await Promise.all([...(failedRoom ? [putRoom(failedRoom)] : []), ...(pausedRun ? [putRun(pausedRun)] : [])])
@@ -172,15 +185,32 @@ export function useRoomController(roomId: string) {
 
   const setRoomStatus = useCallback(async (status: 'paused' | 'running') => {
     const current = bundleRef.current
-    if (!current) return
-    const revision = current.room.controlRevision ?? await register(current)
-    const response = await api.control(roomId, { action: status === 'paused' ? 'pause' : 'resume', controlRevision: revision, idempotencyKey: crypto.randomUUID() })
-    const room = { ...current.room, status, controlRevision: response.controlRevision, updatedAt: Date.now() }
-    const run = activeRun(current)
+    if (!current) return false
+    let recovered = current.room.controlRevision === undefined
+    let revision = current.room.controlRevision ?? await register(current)
+    if (status === 'paused' && phase.current === 'waiting') activeRequest.current?.controller.abort()
+    let nextRevision = revision
+    try {
+      let response
+      try {
+        response = await api.control(roomId, { action: status === 'paused' ? 'pause' : 'resume', controlRevision: revision, idempotencyKey: crypto.randomUUID() })
+      } catch (error) {
+        if (!controlExpired(error)) throw error
+        recovered = true
+        revision = await register(current)
+        response = await api.control(roomId, { action: status === 'paused' ? 'pause' : 'resume', controlRevision: revision, idempotencyKey: crypto.randomUUID() })
+      }
+      nextRevision = response.controlRevision
+    } catch (error) {
+      if (!(status === 'paused' && error instanceof AgentRoomApiError && error.code === 'ROOM_BUSY')) throw error
+    }
+    const latest = bundleRef.current ?? current
+    const room = { ...latest.room, status, controlRevision: Math.max(nextRevision, latest.room.controlRevision ?? 0), updatedAt: Date.now() }
+    const run = activeRun(latest)
     const nextRun = run ? { ...run, status } : undefined
     await Promise.all([putRoom(room), ...(nextRun ? [putRun(nextRun)] : [])])
-    if (status === 'paused' && phase.current === 'waiting') activeRequest.current?.controller.abort()
     commitBundle((value) => ({ ...value, room, runs: nextRun ? value.runs.map((item) => item.id === nextRun.id ? nextRun : item) : value.runs }))
+    return recovered
   }, [commitBundle, register, roomId])
 
   const stop = useCallback(async () => {
@@ -202,9 +232,17 @@ export function useRoomController(roomId: string) {
   const continueRun = useCallback(async (turnLimit: TurnLimit) => {
     const current = bundleRef.current
     if (!current) return
-    const revision = current.room.controlRevision ?? await register(current)
+    let revision = current.room.controlRevision ?? await register(current)
     const run: LocalRun = { id: crypto.randomUUID(), roomId, turnLimit, turnsCompleted: 0, status: 'running', createdAt: Date.now() }
-    const response = await api.control(roomId, { action: 'continue', idempotencyKey: crypto.randomUUID(), controlRevision: revision, runId: run.id, turnLimit })
+    let response: { controlRevision: number }
+    try {
+      response = await api.control(roomId, { action: 'continue', idempotencyKey: crypto.randomUUID(), controlRevision: revision, runId: run.id, turnLimit })
+    } catch (error) {
+      if (!controlExpired(error)) throw error
+      const recovered: RoomBundle = { ...current, room: { ...current.room, activeRunId: run.id, status: 'running' }, runs: [...current.runs, run] }
+      revision = await register(recovered)
+      response = { controlRevision: revision }
+    }
     const room: LocalRoom = { ...current.room, status: 'running', activeRunId: run.id, controlRevision: response.controlRevision, updatedAt: Date.now() }
     await Promise.all([putRun(run), putRoom(room)])
     commitBundle((value) => ({ ...value, room, runs: [...value.runs, run] }))
@@ -213,18 +251,29 @@ export function useRoomController(roomId: string) {
   const retry = useCallback(async (message: LocalMessage) => {
     const current = bundleRef.current
     if (!current || activeRequest.current) return
+    let recovered = current.room.controlRevision === undefined
     if (current.room.status !== 'running') {
-      await setRoomStatus('running')
+      recovered = (await setRoomStatus('running')) || recovered
     }
-    await startTurn(message.serverTurnId)
+    await startTurn(recovered ? undefined : message.serverTurnId)
   }, [setRoomStatus, startTurn])
 
   const skip = useCallback(async (message: LocalMessage) => {
     const current = bundleRef.current
     const run = current && activeRun(current)
     if (!current || !run) return
-    const revision = current.room.controlRevision ?? await register(current)
-    const response = await api.skip(roomId, { idempotencyKey: crypto.randomUUID(), controlRevision: revision, serverTurnId: message.serverTurnId })
+    let recoveredControl = current.room.controlRevision === undefined
+    const recoveryBundle: RoomBundle = { ...current, room: { ...current.room, status: 'running' } }
+    let revision = current.room.controlRevision ?? await register(recoveryBundle)
+    let response
+    try {
+      response = await api.skip(roomId, { idempotencyKey: crypto.randomUUID(), controlRevision: revision, ...(recoveredControl ? {} : { serverTurnId: message.serverTurnId }) })
+    } catch (error) {
+      if (!controlExpired(error)) throw error
+      recoveredControl = true
+      revision = await register(recoveryBundle)
+      response = await api.skip(roomId, { idempotencyKey: crypto.randomUUID(), controlRevision: revision })
+    }
     const turnsCompleted = response.runTurnsCompleted ?? run.turnsCompleted + 1
     const nextRun: LocalRun = { ...run, turnsCompleted, status: turnsCompleted >= run.turnLimit ? 'finished' : 'running', ...(turnsCompleted >= run.turnLimit ? { finishedAt: Date.now() } : {}) }
     const room: LocalRoom = { ...current.room, status: turnsCompleted >= run.turnLimit ? 'finished' : 'running', controlRevision: response.controlRevision, totalTurnsCompleted: response.totalTurnsCompleted ?? current.room.totalTurnsCompleted + 1, updatedAt: Date.now() }
@@ -241,8 +290,15 @@ export function useRoomController(roomId: string) {
   const saveAgents = useCallback(async (agents: LocalAgent[]) => {
     const current = bundleRef.current
     if (!current) return
-    const revision = current.room.controlRevision ?? await register(current)
-    const response = await api.control(roomId, { action: 'update-roster', idempotencyKey: crypto.randomUUID(), controlRevision: revision, roster: agents.map((agent) => ({ agentId: agent.id, nameKey: agent.normalizedName, enabled: agent.enabled })) })
+    let revision = current.room.controlRevision ?? await register(current)
+    let response
+    try {
+      response = await api.control(roomId, { action: 'update-roster', idempotencyKey: crypto.randomUUID(), controlRevision: revision, roster: agents.map((agent) => ({ agentId: agent.id, nameKey: agent.normalizedName, enabled: agent.enabled })) })
+    } catch (error) {
+      if (!controlExpired(error)) throw error
+      revision = await register(current)
+      response = await api.control(roomId, { action: 'update-roster', idempotencyKey: crypto.randomUUID(), controlRevision: revision, roster: agents.map((agent) => ({ agentId: agent.id, nameKey: agent.normalizedName, enabled: agent.enabled })) })
+    }
     const room = { ...current.room, controlRevision: response.controlRevision, updatedAt: Date.now() }
     await Promise.all([putAgents(agents), putRoom(room)])
     commitBundle((value) => ({ ...value, room, agents }))

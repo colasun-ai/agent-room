@@ -16,7 +16,7 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   config: () => jsonRequest<PublicConfig>('/api/config'),
-  session: () => jsonRequest<{ expiresAt: number }>('/api/session', { method: 'POST', body: '{}' }),
+  session: (challengeToken?: string) => jsonRequest<{ expiresAt: number }>('/api/session', { method: 'POST', body: JSON.stringify(challengeToken ? { challengeToken } : {}) }),
   register: (request: RegisterRoomRequest) => jsonRequest<RegisterRoomResponse>('/api/rooms/register', { method: 'POST', body: JSON.stringify(request) }),
   control: (roomId: string, action: ControlAction) => jsonRequest<{ controlRevision: number }>(`/api/rooms/${encodeURIComponent(roomId)}/control`, { method: 'PATCH', body: JSON.stringify(action) }),
   skip: (roomId: string, body: { idempotencyKey: string; controlRevision: number; serverTurnId?: string }) => jsonRequest<{ controlRevision: number; runTurnsCompleted?: number; totalTurnsCompleted?: number }>(`/api/rooms/${encodeURIComponent(roomId)}/skip`, { method: 'POST', body: JSON.stringify(body) }),
@@ -31,7 +31,7 @@ function assertStreamEvent(value: unknown): StreamEvent {
   if (event.type === 'queued' && (typeof event.serverTurnId !== 'string' || !['short', 'busy'].includes(String(event.queueState)))) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'The queue event was malformed.')
   if (event.type === 'start' && (typeof event.serverTurnId !== 'string' || event.protocolTag !== PROTOCOL_TAG || typeof event.serverChosenAgentId !== 'string' || typeof event.actualModel !== 'string')) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'Reload to use the current AgentRoom protocol.')
   if (event.type === 'content' && (typeof event.serverTurnId !== 'string' || typeof event.delta !== 'string')) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'The response stream contained invalid content.')
-  if (event.type === 'done' && (typeof event.serverTurnId !== 'string' || typeof event.actualModel !== 'string' || typeof event.durationMs !== 'number')) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'The completion event was malformed.')
+  if (event.type === 'done' && (typeof event.serverTurnId !== 'string' || typeof event.actualModel !== 'string' || typeof event.durationMs !== 'number' || typeof event.controlRevision !== 'number' || typeof event.runTurnsCompleted !== 'number' || typeof event.totalTurnsCompleted !== 'number')) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'The completion event was malformed.')
   if (event.type === 'error' && (typeof event.code !== 'string' || typeof event.retryable !== 'boolean')) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'The error event was malformed.')
   return value as StreamEvent
 }
