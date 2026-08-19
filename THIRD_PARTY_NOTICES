@@ -1,0 +1,7 @@
+AgentRoom depends on MIT-, ISC-, and Apache-2.0-licensed open-source packages.
+Copyright and license notices are provided by each dependency in its package distribution.
+
+The configured GLM-5.2 model is developed by Z.ai and is governed independently
+by its model terms, the NVIDIA Open Model Agreement, and the NVIDIA hosted API
+terms. AgentRoom's MIT license does not grant rights to those third-party services.
+

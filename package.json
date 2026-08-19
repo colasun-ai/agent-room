@@ -11,9 +11,13 @@
     "typecheck": "tsc -b",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:integration": "vitest run worker",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm run test",
     "e2e": "playwright test",
+    "test:e2e": "playwright test",
+    "security:scan": "node scripts/secret-scan.mjs",
+    "predeploy": "npm run check && npm run build && npm run security:scan && npm run runtime:gate",
     "deploy": "npm run build && wrangler deploy -c dist/agent_room/wrangler.json",
     "runtime:status": "node scripts/runtime/status.mjs",
     "runtime:gate": "node scripts/runtime/gate.mjs"
