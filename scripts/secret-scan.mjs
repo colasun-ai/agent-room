@@ -10,7 +10,7 @@ const patterns = [
   /nvapi-[A-Za-z0-9_-]{12,}/,
   /sk-[A-Za-z0-9_-]{20,}/,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
-  /(?:NVIDIA_API_KEY|SESSION_HMAC_SECRET|TURNSTILE_SECRET_KEY|SMOKE_TEST_SECRET)\s*=\s*(?!replace-|$)[^\s]+/,
+  /(?:NVIDIA_API_KEY|SESSION_HMAC_SECRET|TURNSTILE_SECRET_KEY|SMOKE_TEST_SECRET)[ \t]*=[ \t]*(?!replace-|\r?$)[^\s]+/m,
 ]
 
 const findings = []
@@ -26,4 +26,3 @@ if (findings.length) {
   process.exit(1)
 }
 console.log(`Secret scan PASS (${files.length} tracked files)`)
-
