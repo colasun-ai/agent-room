@@ -185,7 +185,7 @@ test('creates a room, trusts streamed speaker, pauses, edits, and restores Index
 
 test('shows the real lifecycle, accepts an interruption, and honors direct address after resume', async ({ page }) => {
   await installTurnScripts(page, [
-    { kind: 'success', speakerIndex: 0, delta: 'First streamed answer.', runTurnsCompleted: 1, totalTurnsCompleted: 1, stepMs: 180 },
+    { kind: 'success', speakerIndex: 0, delta: 'First streamed answer.', runTurnsCompleted: 1, totalTurnsCompleted: 1, stepMs: 700 },
     { kind: 'success', speakerIndex: 1, delta: 'Maya follows up.', runTurnsCompleted: 2, totalTurnsCompleted: 2, stepMs: 180 },
   ])
   const apiState = await installControlApi(page)

@@ -12,4 +12,6 @@
 - `npm audit --audit-level=high`: 0 vulnerabilities
 - Final independent security review: APPROVE; zero open CRITICAL/MAJOR
 - Final independent PRD/release code review: APPROVE; zero open CRITICAL/MAJOR
+- Public GitHub repository: `https://github.com/colasun-ai/agent-room`
+- First hosted CI run passed all deterministic gates except one WebKit lifecycle observation that missed a deliberately short 180 ms waiting state under runner load; the state duration was lengthened for deterministic observation and CI rerun.
 - Public NVIDIA streaming/abort smoke: NOT RUN; blocked by hosted API eligibility and missing permitted deployment key
