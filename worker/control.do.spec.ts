@@ -52,6 +52,34 @@ describe('SQLite ControlPlane integration', () => {
     expect(states).toEqual([{ key: 'turn-key-0001', status: 'error' }, { key: 'turn-key-0002', status: 'done' }])
   })
 
+  it('records pause during a live turn and retains it after completion', async () => {
+    const stub = newStub(), now = Date.now()
+    await post(stub, '/session/create', session(now))
+    await post(stub, '/rooms/register', { sessionId: 'session-0001', roomId: 'room-0001', runId: 'run-00001', turnLimit: 6, roster, now })
+    const begun = await (await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0001', idempotencyKey: 'turn-key-0001', roomId: 'room-0001', runId: 'run-00001', now })).json<Json>()
+    await expect(post(stub, '/rooms/control', { sessionId: 'session-0001', roomId: 'room-0001', action: 'pause', idempotencyKey: 'pause-0001', controlRevision: 1, now: now + 1 })).resolves.toMatchObject({ status: 200 })
+    const finished = await post(stub, '/turn/finish', { sessionId: 'session-0001', roomId: 'room-0001', leaseId: begun.leaseId, serverTurnId: begun.serverTurnId, mentions: [], now: now + 2 })
+    await expect(finished.json()).resolves.toMatchObject({ controlRevision: 3, runTurnsCompleted: 1 })
+    const stored = await runInDurableObject(stub, (_instance, state) => [...state.storage.sql.exec<{ data: string }>('SELECT data FROM rooms WHERE room_id=?', 'room-0001')][0])
+    const room = JSON.parse(stored.data) as Json
+    expect(room).toMatchObject({ status: 'paused' })
+    expect(room).not.toHaveProperty('activeLease')
+  })
+
+  it('retries a pre-token failure with the same speaker and advances only on success', async () => {
+    const stub = newStub(), now = Date.now()
+    await post(stub, '/session/create', session(now))
+    await post(stub, '/rooms/register', { sessionId: 'session-0001', roomId: 'room-0001', runId: 'run-00001', turnLimit: 6, roster, now })
+    const first = await (await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0001', idempotencyKey: 'turn-key-0001', roomId: 'room-0001', runId: 'run-00001', now })).json<Json>()
+    await post(stub, '/turn/fail', { sessionId: 'session-0001', roomId: 'room-0001', leaseId: first.leaseId, serverTurnId: first.serverTurnId, now: now + 1 })
+    const afterFailure = await runInDurableObject(stub, (_instance, state) => JSON.parse([...state.storage.sql.exec<{ data: string }>('SELECT data FROM rooms WHERE room_id=?', 'room-0001')][0].data) as Json)
+    expect(afterFailure).toMatchObject({ cursorIndex: 0, runTurnsCompleted: 0, totalTurnsCompleted: 0 })
+    const retried = await (await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0002', idempotencyKey: 'turn-key-0002', roomId: 'room-0001', runId: 'run-00001', retryOfServerTurnId: first.serverTurnId, now: now + 2 })).json<Json>()
+    expect(retried.speakerId).toBe(first.speakerId)
+    const finished = await post(stub, '/turn/finish', { sessionId: 'session-0001', roomId: 'room-0001', leaseId: retried.leaseId, serverTurnId: retried.serverTurnId, mentions: [], now: now + 3 })
+    await expect(finished.json()).resolves.toMatchObject({ runTurnsCompleted: 1, totalTurnsCompleted: 1 })
+  })
+
   it('never shortens cooldown and retains it after Durable Object eviction', async () => {
     const id = namespace.idFromName(crypto.randomUUID()), stub = namespace.get(id), now = Date.now(), longUntil = now + 60 * 60_000
     await post(stub, '/quota/cooldown', { until: longUntil })

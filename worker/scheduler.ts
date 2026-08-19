@@ -48,7 +48,7 @@ export function chooseSpeaker(room: RoomRecord, userAddress?: string, retrySpeak
 
   const addressedName = exactAddress(userAddress, enabled)
   const addressed = enabled.find((entry) => entry.nameKey === addressedName)
-  if (addressed && addressed.agentId !== room.lastCompletedSpeakerId) {
+  if (addressed) {
     return { agentId: addressed.agentId, boosted: addressed.agentId !== normal.agentId, reason: 'user-address' }
   }
   const mentioned = room.lastAcceptedMentions

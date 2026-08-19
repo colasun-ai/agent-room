@@ -118,6 +118,8 @@ export function createStreamingWriter(initial: LocalMessage, onFlush?: (message:
     await putMessage(current)
     onFlush?.(current)
   }
+  const pagehide = () => { void flush() }
+  window.addEventListener('pagehide', pagehide)
   return {
     update(next: LocalMessage) {
       current = next
@@ -125,6 +127,11 @@ export function createStreamingWriter(initial: LocalMessage, onFlush?: (message:
       else if (!timer) timer = window.setTimeout(() => void flush(), 350)
     },
     async finish(next?: LocalMessage) { if (next) current = next; await flush() },
+    async close(next?: LocalMessage) {
+      window.removeEventListener('pagehide', pagehide)
+      if (next) current = next
+      await flush()
+    },
     snapshot() { return current },
   }
 }

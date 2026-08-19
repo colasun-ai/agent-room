@@ -34,6 +34,21 @@ describe('Worker HTTP integration', () => {
     await expect(response.json()).resolves.toMatchObject({ error: { code: 'INVALID_REQUEST' } })
   })
 
+  it('rejects a third-party Origin and fails closed when the coordinator is unavailable', async () => {
+    const env = environment()
+    const thirdParty = await handleRequest(new Request('https://worker.test/api/session', { method: 'POST', headers: { origin: 'https://evil.test', 'content-type': 'application/json' }, body: '{}' }), env)
+    expect(thirdParty.status).toBe(403)
+    const cookie = await issueSession({ sessionId: 'session-id', expiresAt: Date.now() + 60_000 }, env.SESSION_HMAC_SECRET)
+    const rejectingStub = { fetch: vi.fn().mockRejectedValue(new Error('coordinator unavailable')) }
+    env.CONTROL_PLANE = { idFromName: vi.fn(() => ({ toString: () => 'id' })), get: vi.fn(() => rejectingStub) } as unknown as DurableObjectNamespace
+    const unavailable = await handleRequest(new Request('https://worker.test/api/rooms/room-0001/control', {
+      method: 'PATCH', headers: { origin: env.PUBLIC_ORIGIN, cookie: `ar_session=${cookie}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'pause', idempotencyKey: 'pause-key-0001', controlRevision: 1 }),
+    }), env)
+    expect(unavailable.status).toBe(503)
+    await expect(unavailable.json()).resolves.toMatchObject({ error: { code: 'SERVICE_UNAVAILABLE' } })
+  })
+
   it('forwards the frontend skip revision and failed server turn metadata', async () => {
     let skipBody: Record<string, unknown> | undefined
     const env = environment(async (request) => {
@@ -71,6 +86,19 @@ describe('Worker HTTP integration', () => {
     } finally { upstream.mockRestore() }
   })
 
+  it('rejects a failed Siteverify response without creating or verifying a session', async () => {
+    const control = vi.fn(async () => Response.json({ ok: true }))
+    const env = environment(control)
+    env.TURNSTILE_SECRET_KEY = 'turnstile-secret'
+    const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ success: false, hostname: 'app.test', action: 'agentroom-session' }))
+    try {
+      const response = await handleRequest(new Request('https://worker.test/api/session', { method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ challengeToken: 'invalid-token' }) }), env)
+      expect(response.status).toBe(403)
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'CHALLENGE_REQUIRED' } })
+      expect(control).not.toHaveBeenCalled()
+    } finally { upstream.mockRestore() }
+  })
+
   it('silently replaces a signed cookie whose durable session has expired', async () => {
     const paths: string[] = []
     const env = environment(async (request) => {
@@ -91,7 +119,7 @@ describe('Worker HTTP integration', () => {
     const env = environment(async (request) => {
       const path = new URL(request.url).pathname; paths.push(path)
       if (path === '/session/validate') return Response.json({ ok: true })
-      if (path === '/turn/begin') return Response.json({ serverTurnId: '11111111-1111-4111-8111-111111111111', leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, expiresAt: Date.now() + 1000 })
+      if (path === '/turn/begin') return Response.json({ serverTurnId: '11111111-1111-4111-8111-111111111111', leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, queueState: 'short', expiresAt: Date.now() + 1000 })
       if (path === '/quota/acquire') return Response.json({ leaseId: 'quota-lease', expiresAt: Date.now() + 1000, queueState: 'short' })
       if (path === '/turn/finish') return Response.json({ controlRevision: 2, runTurnsCompleted: 1, totalTurnsCompleted: 1 })
       return Response.json({ ok: true })
@@ -122,7 +150,7 @@ describe('Worker HTTP integration', () => {
     const env = environment(async (request) => {
       const path = new URL(request.url).pathname; paths.push(path)
       if (path === '/session/validate') return Response.json({ ok: true })
-      if (path === '/turn/begin') return Response.json({ serverTurnId: '11111111-1111-4111-8111-111111111111', leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, expiresAt: Date.now() + 1000 })
+      if (path === '/turn/begin') return Response.json({ serverTurnId: '11111111-1111-4111-8111-111111111111', leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, queueState: 'short', expiresAt: Date.now() + 1000 })
       if (path === '/quota/acquire') return Response.json({ leaseId: `quota-${paths.filter((item) => item === path).length}`, expiresAt: Date.now() + 1000 })
       if (path === '/turn/finish') return Response.json({ controlRevision: 2, runTurnsCompleted: 1, totalTurnsCompleted: 1 })
       return Response.json({ ok: true })

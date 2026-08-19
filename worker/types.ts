@@ -77,6 +77,7 @@ export interface TurnBeginResult {
   speakerId: string
   speakerNameKey: string
   boosted: boolean
+  queueState: 'short' | 'busy'
   duplicate?: boolean
   expiresAt: number
 }

@@ -29,6 +29,13 @@ describe('speaker scheduler', () => {
     expect(chooseSpeaker(room(), 'Could @Maya review?').agentId).toBe('agent-0001')
   })
 
+  it('honors a user who directly addresses the previous speaker again', () => {
+    const state = room()
+    state.cursorIndex = 1
+    state.lastCompletedSpeakerId = 'agent-0001'
+    expect(chooseSpeaker(state, '@Alex follow up')).toMatchObject({ agentId: 'agent-0001', boosted: true, reason: 'user-address' })
+  })
+
   it('caps boosts and guards starvation across mention cycles', () => {
     const state = room()
     state.lastAcceptedMentions = ['maya']
@@ -37,6 +44,14 @@ describe('speaker scheduler', () => {
     state.fairness.consecutiveBoosts = 0
     state.fairness.turnsSinceSpoke['agent-0003'] = 10
     expect(chooseSpeaker(state)).toMatchObject({ agentId: 'agent-0003', reason: 'starvation' })
+  })
+
+  it('keeps a failed retry on its original speaker without mutating the cursor', () => {
+    const state = room()
+    state.cursorIndex = 2
+    const before = structuredClone(state)
+    expect(chooseSpeaker(state, undefined, 'agent-0002')).toMatchObject({ agentId: 'agent-0002', reason: 'round-robin' })
+    expect(state).toEqual(before)
   })
 })
 

@@ -23,6 +23,15 @@ const en = {
   anonymousExplain: 'An anonymous server session exists only for abuse prevention and fair capacity.', capacityExplain: 'Availability may vary. This public NVIDIA-backed demo has a deliberately conservative shared limit.',
   deleteRoom: 'Delete room', deleteConfirm: 'Delete this room and all of its local history?', notFound: 'Room not found', home: 'Go home',
   editAgents: 'Edit agents', save: 'Save changes', close: 'Close', draft: 'Draft', running: 'Running', paused: 'Paused', finished: 'Finished', error: 'Needs attention',
+  rateLimitedNotice: 'Shared public AI capacity is temporarily limited. Please wait before retrying.',
+  dailyLimitNotice: 'Today’s shared public AI allowance has been used. Local rooms and history remain available.',
+  serviceDisabledNotice: 'Public AI replies are temporarily unavailable. Local rooms and history remain available.',
+  serviceErrorNotice: 'The service could not complete that request. Please try again later.',
+  protocolNotice: 'AgentRoom was updated. Reload this page before continuing.',
+  roomBusyNotice: 'This room is finishing another operation. Please retry in a moment.',
+  invalidNotice: 'That change could not be accepted. Review the room settings and try again.',
+  challengeUnavailable: 'Verification is required but could not load. Please retry shortly.',
+  verificationInProgress: 'Verifying…', capacityLinks: 'You can also inspect the source or deploy your own instance.', reload: 'Reload',
 } as const
 
 const zh: Record<keyof typeof en, string> = {
@@ -48,6 +57,15 @@ const zh: Record<keyof typeof en, string> = {
   anonymousExplain: '匿名服务端会话仅用于防滥用与公平分配共享容量。', capacityExplain: '可用性可能波动。此 NVIDIA 公共体验采用了审慎的共享额度限制。',
   deleteRoom: '删除房间', deleteConfirm: '删除此房间及其全部本地历史吗？', notFound: '未找到房间', home: '回到首页',
   editAgents: '编辑 Agents', save: '保存修改', close: '关闭', draft: '草稿', running: '运行中', paused: '已暂停', finished: '已结束', error: '需要处理',
+  rateLimitedNotice: '共享公共 AI 容量暂时受限，请稍后再试。',
+  dailyLimitNotice: '今天的公共共享额度已用完。本地房间和历史记录仍可正常使用。',
+  serviceDisabledNotice: '公共 AI 回复暂时不可用。本地房间和历史记录仍可正常使用。',
+  serviceErrorNotice: '服务暂时无法完成该请求，请稍后再试。',
+  protocolNotice: 'AgentRoom 已更新，请刷新页面后继续。',
+  roomBusyNotice: '此房间正在完成另一项操作，请稍后重试。',
+  invalidNotice: '无法接受这项修改，请检查房间设置后重试。',
+  challengeUnavailable: '当前需要验证，但验证组件无法加载，请稍后重试。',
+  verificationInProgress: '正在验证…', capacityLinks: '你也可以查看源码或自行部署实例。', reload: '刷新',
 }
 
 export type TranslationKey = keyof typeof en

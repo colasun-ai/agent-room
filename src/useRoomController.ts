@@ -34,8 +34,13 @@ export function useRoomController(roomId: string) {
   const [driver, setDriver] = useState(false)
   const [notice, setNotice] = useState<string>()
   const [busy, setBusy] = useState(false)
+  const [challengeSiteKey, setChallengeSiteKey] = useState<string>()
+  const [challengeVerifying, setChallengeVerifying] = useState(false)
+  const [challengeRequired, setChallengeRequired] = useState(false)
   const activeRequest = useRef<{ controller: AbortController; messageId: string } | undefined>(undefined)
   const phase = useRef<'idle' | 'waiting' | 'streaming'>('idle')
+  const challengeRetry = useRef<(() => Promise<unknown>) | undefined>(undefined)
+  const startTurnRef = useRef<(retryOfServerTurnId?: string) => Promise<void>>(async () => undefined)
   const coordinator = useRef<RoomCoordinator | undefined>(undefined)
   const bundleRef = useRef<RoomBundle | undefined>(undefined)
 
@@ -71,6 +76,22 @@ export function useRoomController(roomId: string) {
     setBundle(next)
     coordinator.current?.changed()
   }, [])
+
+  const requestChallenge = useCallback(async () => {
+    setChallengeRequired(true)
+    const config = await api.config().catch(() => undefined)
+    setChallengeSiteKey(config?.turnstileSiteKey)
+    setNotice(config?.turnstileSiteKey ? undefined : 'CHALLENGE_UNAVAILABLE')
+  }, [])
+
+  const reportError = useCallback(async (error: unknown, retry?: () => Promise<unknown>) => {
+    if (error instanceof AgentRoomApiError && error.code === 'CHALLENGE_REQUIRED') {
+      challengeRetry.current = retry
+      await requestChallenge()
+      return
+    }
+    setNotice(error instanceof AgentRoomApiError ? error.code : 'SERVICE_ERROR')
+  }, [requestChallenge])
 
   const register = useCallback(async (current: RoomBundle) => {
     await api.session()
@@ -159,9 +180,10 @@ export function useRoomController(roomId: string) {
       await writer.finish(message)
       const latest = bundleRef.current
       const expired = controlExpired(apiError)
-      const failedRoom = latest ? { ...latest.room, status: 'paused' as const, ...(expired ? { controlRevision: undefined } : {}), updatedAt: Date.now() } : undefined
+      const challenged = apiError?.code === 'CHALLENGE_REQUIRED'
+      const failedRoom = latest ? { ...latest.room, status: challenged ? latest.room.status : 'paused' as const, ...(expired ? { controlRevision: undefined } : {}), updatedAt: Date.now() } : undefined
       const failedRun = latest && failedRoom ? activeRun(latest) : undefined
-      const pausedRun = failedRun ? { ...failedRun, status: 'paused' as const } : undefined
+      const pausedRun = failedRun ? { ...failedRun, status: challenged ? failedRun.status : 'paused' as const } : undefined
       await Promise.all([...(failedRoom ? [putRoom(failedRoom)] : []), ...(pausedRun ? [putRun(pausedRun)] : [])])
       commitBundle((value) => ({
         ...value,
@@ -169,41 +191,60 @@ export function useRoomController(roomId: string) {
         runs: pausedRun ? value.runs.map((item) => item.id === pausedRun.id ? pausedRun : item) : value.runs,
         messages: value.messages.map((item) => item.id === messageId ? message : item),
       }))
-      if (!aborted) setNotice(apiError?.code ?? 'SERVICE_ERROR')
+      if (!aborted) await reportError(apiError ?? error, () => startTurnRef.current(retryOfServerTurnId))
     } finally {
-      activeRequest.current = undefined; phase.current = 'idle'; setBusy(false)
+      try { await writer.close(message) } finally {
+        activeRequest.current = undefined; phase.current = 'idle'; setBusy(false)
+      }
     }
-  }, [commitBundle, register, roomId])
+  }, [commitBundle, register, reportError, roomId])
+
+  useEffect(() => { startTurnRef.current = startTurn }, [startTurn])
 
   useEffect(() => {
-    if (!bundle || !driver || bundle.room.status !== 'running' || activeRequest.current) return
+    if (!bundle || !driver || challengeRequired || bundle.room.status !== 'running' || activeRequest.current) return
     const run = activeRun(bundle)
     if (!run || run.turnsCompleted >= run.turnLimit) return
     const timer = window.setTimeout(() => void startTurn(), bundle.messages.length ? 650 : 0)
     return () => window.clearTimeout(timer)
-  }, [bundle, driver, startTurn])
+  }, [bundle, challengeRequired, driver, startTurn])
 
   const setRoomStatus = useCallback(async (status: 'paused' | 'running') => {
     const current = bundleRef.current
     if (!current) return false
+    if (status === 'paused') {
+      const room: LocalRoom = { ...current.room, status: 'paused', updatedAt: Date.now() }
+      const run = activeRun(current)
+      const nextRun = run ? { ...run, status: 'paused' as const } : undefined
+      await Promise.all([putRoom(room), ...(nextRun ? [putRun(nextRun)] : [])])
+      commitBundle((value) => ({ ...value, room, runs: nextRun ? value.runs.map((item) => item.id === nextRun.id ? nextRun : item) : value.runs }))
+    }
     let recovered = current.room.controlRevision === undefined
-    let revision = current.room.controlRevision ?? await register(current)
+    let revision = current.room.controlRevision ?? await register(bundleRef.current ?? current)
     if (status === 'paused' && phase.current === 'waiting') activeRequest.current?.controller.abort()
     let nextRevision = revision
-    try {
-      let response
+    let confirmed = false
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        response = await api.control(roomId, { action: status === 'paused' ? 'pause' : 'resume', controlRevision: revision, idempotencyKey: crypto.randomUUID() })
+        const response = await api.control(roomId, { action: status === 'paused' ? 'pause' : 'resume', controlRevision: revision, idempotencyKey: crypto.randomUUID() })
+        nextRevision = response.controlRevision
+        confirmed = true
+        break
       } catch (error) {
-        if (!controlExpired(error)) throw error
-        recovered = true
-        revision = await register(current)
-        response = await api.control(roomId, { action: status === 'paused' ? 'pause' : 'resume', controlRevision: revision, idempotencyKey: crypto.randomUUID() })
+        if (controlExpired(error) || (attempt === 0 && status === 'paused' && error instanceof AgentRoomApiError && error.code === 'INVALID_REQUEST')) {
+          recovered = true
+          revision = await register(bundleRef.current ?? current)
+          continue
+        }
+        if (status === 'paused' && error instanceof AgentRoomApiError && error.code === 'ROOM_BUSY' && attempt < 3) {
+          await new Promise((resolve) => window.setTimeout(resolve, 80 * (2 ** attempt)))
+          revision = bundleRef.current?.room.controlRevision ?? revision
+          continue
+        }
+        throw error
       }
-      nextRevision = response.controlRevision
-    } catch (error) {
-      if (!(status === 'paused' && error instanceof AgentRoomApiError && error.code === 'ROOM_BUSY')) throw error
     }
+    if (!confirmed) throw new AgentRoomApiError('SERVICE_UNAVAILABLE', 'Room state could not be synchronized.', true)
     const latest = bundleRef.current ?? current
     const room = { ...latest.room, status, controlRevision: Math.max(nextRevision, latest.room.controlRevision ?? 0), updatedAt: Date.now() }
     const run = activeRun(latest)
@@ -215,8 +256,8 @@ export function useRoomController(roomId: string) {
 
   const stop = useCallback(async () => {
     activeRequest.current?.controller.abort()
-    try { await setRoomStatus('paused') } catch { /* abort remains real even if control response is lost */ }
-  }, [setRoomStatus])
+    try { await setRoomStatus('paused') } catch (error) { await reportError(error, () => setRoomStatus('paused')) }
+  }, [reportError, setRoomStatus])
 
   const sendUserMessage = useCallback(async (content: string) => {
     const current = bundleRef.current
@@ -302,7 +343,44 @@ export function useRoomController(roomId: string) {
     const room = { ...current.room, controlRevision: response.controlRevision, updatedAt: Date.now() }
     await Promise.all([putAgents(agents), putRoom(room)])
     commitBundle((value) => ({ ...value, room, agents }))
+    return true
   }, [commitBundle, register, roomId])
 
-  return { bundle, loading, driver, notice, busy, refresh, pause: () => setRoomStatus('paused'), resume: () => setRoomStatus('running'), stop, sendUserMessage, continueRun, retry, skip, keepPartial, saveAgents }
+  const verifyChallenge = useCallback(async (token: string) => {
+    if (challengeVerifying) return
+    setChallengeVerifying(true)
+    const retry = challengeRetry.current
+    try {
+      await api.session(token)
+      setChallengeSiteKey(undefined)
+      setChallengeRequired(false)
+      setNotice(undefined)
+      if (retry) await retry()
+      challengeRetry.current = undefined
+    } catch (error) {
+      await reportError(error, retry)
+    } finally {
+      setChallengeVerifying(false)
+    }
+  }, [challengeVerifying, reportError])
+
+  const safeAction = useCallback(async (action: () => Promise<unknown>) => {
+    try { return await action() } catch (error) { await reportError(error, action); return undefined }
+  }, [reportError])
+  const challengeError = useCallback(() => setNotice('CHALLENGE_UNAVAILABLE'), [])
+
+  return {
+    bundle, loading, driver, notice, busy, challengeSiteKey, challengeVerifying, refresh,
+    pause: () => safeAction(() => setRoomStatus('paused')),
+    resume: () => safeAction(() => setRoomStatus('running')),
+    stop,
+    sendUserMessage,
+    continueRun: (limit: TurnLimit) => safeAction(() => continueRun(limit)),
+    retry: (message: LocalMessage) => safeAction(() => retry(message)),
+    skip: (message: LocalMessage) => safeAction(() => skip(message)),
+    keepPartial,
+    saveAgents: (agents: LocalAgent[]) => safeAction(() => saveAgents(agents)),
+    verifyChallenge,
+    challengeError,
+  }
 }

@@ -1,19 +1,19 @@
 {
   "runtimeSchema": 1,
-  "revision": 3,
-  "phase": "implementation",
+  "revision": 4,
+  "phase": "release-review",
   "releaseClass": "PUBLIC_BETA",
   "deploymentState": "NOT_DEPLOYED",
   "tasks": [
     {"id":"T-001","title":"Bootstrap runtime and contracts","owner":"lead","status":"DONE","priority":"P0","phase":"bootstrap","dependsOn":[]},
-    {"id":"T-100","title":"Frontend and local state","owner":"frontend-agent","status":"RUNNING","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
-    {"id":"T-200","title":"Worker engine and control plane","owner":"backend-agent","status":"RUNNING","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
-    {"id":"T-300","title":"Security review","owner":"security-agent","status":"BACKLOG","priority":"P0","phase":"review","dependsOn":["T-100","T-200"]},
-    {"id":"T-400","title":"Final QA and release","owner":"qa-release-agent","status":"BACKLOG","priority":"P0","phase":"release","dependsOn":["T-300"]}
+    {"id":"T-100","title":"Frontend and local state","owner":"frontend-agent","status":"DONE","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
+    {"id":"T-200","title":"Worker engine and control plane","owner":"backend-agent","status":"DONE","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
+    {"id":"T-300","title":"Security review","owner":"security-agent","status":"DONE","priority":"P0","phase":"review","dependsOn":["T-100","T-200"]},
+    {"id":"T-400","title":"Final QA and release","owner":"qa-release-agent","status":"RUNNING","priority":"P0","phase":"release","dependsOn":["T-300"]}
   ],
-  "gates": {"runtime":"PASS","contracts":"PASS","security":"PENDING","predeploy":"PENDING","public":"PENDING"},
+  "gates": {"runtime":"PASS","contracts":"PASS","security":"PASS","predeploy":"BLOCKED_EXTERNAL","public":"BLOCKED_EXTERNAL"},
   "openIssues": [
-    {"severity":"BLOCKER","type":"environment","summary":"Public deployment and real upstream smoke not yet verified"},
-    {"severity":"MAJOR","type":"implementation","summary":"Application implementation not yet complete"}
+    {"severity":"BLOCKER","type":"legal","summary":"NVIDIA Trial Terms prohibit the required public inference serving; a permitted hosted agreement and deployment-scoped key are missing"},
+    {"severity":"BLOCKER","type":"authorization","summary":"Cloudflare CLI authorization expired; account-holder reauthorization is required before public deployment"}
   ]
 }

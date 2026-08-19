@@ -113,6 +113,12 @@ export class ControlPlane extends DurableObject<Env> {
     sql.exec('DELETE FROM room_pacing WHERE room_id NOT IN (SELECT room_id FROM rooms)')
   }
 
+  private capacityBusy(now: number): boolean {
+    const active = Number(this.one('SELECT COUNT(*) count FROM permits WHERE expires_at > ?', now)?.count ?? 0)
+    const rpm = Number(this.one('SELECT COUNT(*) count FROM attempts WHERE at > ?', now - 60_000)?.count ?? 0)
+    return this.queue.size > 2 || active >= Number(this.env.MAX_CONCURRENT_UPSTREAM || 2) || rpm >= Math.min(28, Number(this.env.OPERATING_UPSTREAM_RPM || 28))
+  }
+
   private error(code: string, status: number, retryAfterMs?: number): Response {
     return json({ error: { code, retryable: code === 'RATE_LIMITED' || code === 'CAPACITY_EXHAUSTED' || code === 'QUEUE_TIMEOUT', retryAfterMs } }, status)
   }
@@ -205,7 +211,7 @@ export class ControlPlane extends DurableObject<Env> {
     const writeGate = this.controlWriteGate(sessionId, now)
     if (writeGate) return writeGate
     if (Number(body.controlRevision) !== room.controlRevision) return this.error('INVALID_REQUEST', 409)
-    if (room.activeLease && room.activeLease.expiresAt > now) return this.error('ROOM_BUSY', 409)
+    if (body.action !== 'pause' && room.activeLease && room.activeLease.expiresAt > now) return this.error('ROOM_BUSY', 409)
     if ((body.action === 'resume' || body.action === 'continue') && this.hasOtherRunningRoom(sessionId, roomId, now)) return this.error('ROOM_BUSY', 409)
     let updated: RoomRecord
     try { updated = transitionControl(room, body as never, now) }
@@ -268,7 +274,7 @@ export class ControlPlane extends DurableObject<Env> {
     if (body.retryOfServerTurnId && !retrySpeaker) return this.error('INVALID_REQUEST', 400)
     const choice = chooseSpeaker(room, body.latestUserDirectAddress, retrySpeaker)
     const speakerNameKey = room.roster.find((entry) => entry.agentId === choice.agentId)!.nameKey
-    const result: TurnBeginResult & { choice: SpeakerChoice } = { serverTurnId: crypto.randomUUID(), leaseId: crypto.randomUUID(), speakerId: choice.agentId, speakerNameKey, boosted: choice.boosted, expiresAt: now + 240_000, choice }
+    const result: TurnBeginResult & { choice: SpeakerChoice } = { serverTurnId: crypto.randomUUID(), leaseId: crypto.randomUUID(), speakerId: choice.agentId, speakerNameKey, boosted: choice.boosted, queueState: this.capacityBusy(now) ? 'busy' : 'short', expiresAt: now + 240_000, choice }
     room.activeLease = { leaseId: result.leaseId, serverTurnId: result.serverTurnId, expiresAt: result.expiresAt }; room.updatedAt = now
     this.ctx.storage.transactionSync(() => {
       this.writeRoom(room)
@@ -410,6 +416,6 @@ export class ControlPlane extends DurableObject<Env> {
     const killed = this.one("SELECT value FROM meta WHERE key='provider_killed'")?.value === '1'
     const daily = Number(this.one('SELECT COUNT(*) count FROM attempts WHERE at >= ?', utcDayStart(now))?.count ?? 0)
     const dailyLimit = effectiveDailyAttemptLimit(Number(this.env.GLOBAL_DAILY_ATTEMPT_LIMIT ?? 24_000), this.env.EFFECTIVE_DAILY_ATTEMPT_LIMIT === undefined ? undefined : Number(this.env.EFFECTIVE_DAILY_ATTEMPT_LIMIT))
-    return json({ killed, cooldown: cooldown > now, dailyExhausted: daily >= dailyLimit, busy: this.queue.size > 2 })
+    return json({ killed, cooldown: cooldown > now, dailyExhausted: daily >= dailyLimit, busy: this.capacityBusy(now) })
   }
 }

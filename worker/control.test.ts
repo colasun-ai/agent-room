@@ -12,9 +12,10 @@ describe('room control transitions', () => {
     expect(next).toMatchObject({ activeRunId: 'run-00002', runTurnLimit: 6, runTurnsCompleted: 0, totalTurnsCompleted: 12, status: 'running', controlRevision: 5 })
   })
 
-  it('rejects stale revisions and live leases', () => {
+  it('rejects stale revisions and non-pause writes during live leases', () => {
     expect(() => transitionControl(base(), { action: 'pause', idempotencyKey: 'idem-0001', controlRevision: 3 }, 10)).toThrow('REVISION_CONFLICT')
     const busy = base(); busy.activeLease = { leaseId: 'lease', serverTurnId: 'turn', expiresAt: 20 }
-    expect(() => transitionControl(busy, { action: 'pause', idempotencyKey: 'idem-0001', controlRevision: 4 }, 10)).toThrow('ROOM_BUSY')
+    expect(transitionControl(busy, { action: 'pause', idempotencyKey: 'idem-0001', controlRevision: 4 }, 10)).toMatchObject({ status: 'paused', controlRevision: 5, activeLease: busy.activeLease })
+    expect(() => transitionControl(busy, { action: 'continue', idempotencyKey: 'idem-0002', controlRevision: 4, runId: 'run-00002', turnLimit: 6 }, 10)).toThrow('ROOM_BUSY')
   })
 })

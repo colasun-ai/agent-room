@@ -22,11 +22,11 @@ effectiveDailyAttemptLimit = min(
 )
 ```
 
-At the code-policy ceiling of 24,000 attempts/day, average issue rate is only 16.7/minute; 28 RPM is a burst/rolling-window ceiling, not a daily throughput promise. With one inbound turn request and no DO proxy streaming, Workers requests remain below the 80,000 reserved operating budget. The control-plane implementation must stay near at most three billed DO sessions and three row writes per attempt to keep 24,000 attempts under the corresponding 80,000 reserved budgets. Session, register, control, challenge, asset, retry, and smoke traffic consumes the remainder.
+The production configuration currently sets `EFFECTIVE_DAILY_ATTEMPT_LIMIT=12,000`, below the 24,000 policy ceiling. A normal successful turn uses four control-plane RPCs (begin, acquire, finish and release; begin also validates the Session), so 12,000 attempts consume at most 48,000 DO requests on that path. This leaves 32,000 requests for Session creation, register, control, challenge, error/retry and smoke traffic inside the 80,000 operating budget, while retaining the final 20% of the 100,000 Free allowance as a hard reserve. The queue-state snapshot is returned by the existing begin RPC and does not add another request.
 
 If measurement exceeds either per-attempt envelope, the daily cap must be lowered automatically/configurably:
 
-- 4 DO sessions/attempt ⇒ floor(80,000 / 4) = 20,000 attempts/day before other controls.
+- 4 DO requests/normal successful attempt × 12,000 configured attempts = 48,000 requests/day, leaving 32,000 operating requests for non-attempt control traffic.
 - 4 rows written/attempt ⇒ the same 20,000 ceiling.
 - Duration ceiling is 13,000 GB-s/day; a 128 MB DO may stay billed for at most about 104,000 active seconds/day. The coordinator must finish transactions quickly and never proxy NVIDIA token streams.
 
@@ -35,4 +35,3 @@ The likely first Cloudflare bottleneck is DO request/row-write count, not RPM. S
 ## Required pre-release measurement
 
 For success, 401/429/503, queued cancel, pre-token abort, mid-stream abort, and timeout, record only non-content counts: Worker requests, DO/RPC sessions, rows read/written, subrequests, CPU, active duration, permit/lease outcome. Run 100/500/1,000 logical turns only with mocks and test fairness at 1/3/5/10 rooms. Run real NVIDIA only as a small permitted smoke. Until those deployed measurements exist, 24,000 is a code ceiling rather than a verified safe daily promise.
-

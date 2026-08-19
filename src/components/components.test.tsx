@@ -32,6 +32,13 @@ describe('safe markdown', () => {
     expect(screen.getByRole('link')).toHaveAttribute('target', '_blank')
   })
 
+  it('blocks javascript links and SVG/HTML payloads', () => {
+    const { container } = render(<MarkdownMessage content={'[bad](javascript:alert(1)) <svg><script>alert(2)</script></svg>'} agents={[agent]}/>)
+    expect(container.querySelector('a[href^="javascript"]')).toBeNull()
+    expect(container.querySelector('svg')).toBeNull()
+    expect(container.querySelector('script')).toBeNull()
+  })
+
   it('copies code without executing it', () => {
     Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
     render(<MarkdownMessage content={'```js\nconsole.log("safe")\n```'} agents={[agent]}/>)

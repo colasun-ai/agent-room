@@ -89,27 +89,24 @@ async function config(env: Env): Promise<Response> {
 }
 
 async function register(request: Request, env: Env, session: SessionIdentity): Promise<Response> {
-  try {
-    const payload = validateRegister(await readJson(request))
-    const response = await controlCall(env, '/rooms/register', { ...payload, sessionId: session.sessionId, now: Date.now() })
-    return response.ok ? new Response(response.body, response) : forwardControl(response)
-  } catch { return apiError('INVALID_REQUEST', 400) }
+  let payload
+  try { payload = validateRegister(await readJson(request)) } catch { return apiError('INVALID_REQUEST', 400) }
+  const response = await controlCall(env, '/rooms/register', { ...payload, sessionId: session.sessionId, now: Date.now() })
+  return response.ok ? new Response(response.body, response) : forwardControl(response)
 }
 
 async function control(request: Request, env: Env, session: SessionIdentity, roomId: string): Promise<Response> {
-  try {
-    const payload = validateControl(await readJson(request))
-    const response = await controlCall(env, '/rooms/control', { ...payload, roomId, sessionId: session.sessionId, now: Date.now() })
-    return response.ok ? new Response(response.body, response) : forwardControl(response)
-  } catch { return apiError('INVALID_REQUEST', 400) }
+  let payload
+  try { payload = validateControl(await readJson(request)) } catch { return apiError('INVALID_REQUEST', 400) }
+  const response = await controlCall(env, '/rooms/control', { ...payload, roomId, sessionId: session.sessionId, now: Date.now() })
+  return response.ok ? new Response(response.body, response) : forwardControl(response)
 }
 
 async function skip(request: Request, env: Env, session: SessionIdentity, roomId: string): Promise<Response> {
-  try {
-    const payload = validateSkip(await readJson(request, 10_000))
-    const response = await controlCall(env, '/rooms/skip', { ...payload, roomId, sessionId: session.sessionId, now: Date.now() })
-    return response.ok ? new Response(response.body, response) : forwardControl(response)
-  } catch { return apiError('INVALID_REQUEST', 400) }
+  let payload
+  try { payload = validateSkip(await readJson(request, 10_000)) } catch { return apiError('INVALID_REQUEST', 400) }
+  const response = await controlCall(env, '/rooms/skip', { ...payload, roomId, sessionId: session.sessionId, now: Date.now() })
+  return response.ok ? new Response(response.body, response) : forwardControl(response)
 }
 
 function streamFrame(event: StreamEvent): Uint8Array {
@@ -155,7 +152,7 @@ async function turn(request: Request, env: Env, session: SessionIdentity, roomId
       const send = (event: StreamEvent): void => { if (!closed) { try { controller.enqueue(streamFrame(event)) } catch { closed = true; aborter.abort() } } }
       const close = (): void => { if (!closed) { closed = true; try { controller.close() } catch { /* client disconnected */ } } }
       void (async () => {
-        send({ type: 'queued', requestId: payload.requestId, serverTurnId: begun.serverTurnId, queueState: 'short' })
+        send({ type: 'queued', requestId: payload.requestId, serverTurnId: begun.serverTurnId, queueState: begun.queueState })
         let visible = false, fullOutput = '', usage: { inputTokens?: number; outputTokens?: number } | undefined
         try {
           for (let attempt = 0; attempt < 2; attempt += 1) {

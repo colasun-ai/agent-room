@@ -3,7 +3,9 @@ import type { RoomRecord } from './types'
 
 export function transitionControl(room: RoomRecord, action: ControlAction, now: number): RoomRecord {
   if (action.controlRevision !== room.controlRevision) throw new Error('REVISION_CONFLICT')
-  if (room.activeLease && room.activeLease.expiresAt > now) throw new Error('ROOM_BUSY')
+  // Pause is a desired room state, not a cancellation of an already-streaming turn.
+  // Recording it while the lease is live prevents the next turn; finishTurn retains it.
+  if (action.action !== 'pause' && room.activeLease && room.activeLease.expiresAt > now) throw new Error('ROOM_BUSY')
   const next: RoomRecord = JSON.parse(JSON.stringify(room)) as RoomRecord
   if (action.action === 'pause') next.status = 'paused'
   else if (action.action === 'resume') {
