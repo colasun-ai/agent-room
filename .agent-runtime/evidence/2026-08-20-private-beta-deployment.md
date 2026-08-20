@@ -10,4 +10,5 @@
 - Cancellation guarantees: coordinator authorization precedes local abort; cancellation atomically clears the room lease, active idempotency state and matching permit; queued/stale acquisition returns `499`; a stale finish returns `409` without advancing turn counters
 - Local release gates: 54 ordinary tests, 11 SQLite Durable Object tests and 56 Playwright checks across desktop, tablet, mobile and WebKit PASS; typecheck, lint, build, runtime gate, secret scan and `git diff --check` PASS
 - Independent security review: APPROVE; zero open CRITICAL/MAJOR
+- Hosted GitHub CI: SUCCESS for release commit `56244c9adeef980fc7128eaf0d54b0f8fbddb599`, run `32333174381`
 - Scope: authorized developers only, for development/evaluation. No anonymous public NVIDIA inference or commercial action was authorized.

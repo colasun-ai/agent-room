@@ -1,6 +1,6 @@
 {
   "runtimeSchema": 1,
-  "revision": 7,
+  "revision": 8,
   "phase": "release",
   "releaseClass": "PRIVATE_BETA",
   "deploymentState": "DEPLOYED_PRIVATE_BETA_AI_ENABLED",
@@ -10,14 +10,18 @@
     "versionId": "c2cb4438-ca8b-47d7-9eb9-8cd64d581e0d",
     "aiEnabled": true,
     "capacityState": "available",
-    "githubCi": { "status": "PENDING_RELEASE_COMMIT" }
+    "githubCi": {
+      "commit": "56244c9adeef980fc7128eaf0d54b0f8fbddb599",
+      "runId": "32333174381",
+      "status": "SUCCESS"
+    }
   },
   "tasks": [
     {"id":"T-001","title":"Bootstrap runtime and contracts","owner":"lead","status":"DONE","priority":"P0","phase":"bootstrap","dependsOn":[]},
     {"id":"T-100","title":"Frontend and local state","owner":"frontend-agent","status":"DONE","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
     {"id":"T-200","title":"Worker engine and control plane","owner":"backend-agent","status":"DONE","priority":"P0","phase":"implementation","dependsOn":["T-001"]},
     {"id":"T-300","title":"Security review","owner":"security-agent","status":"DONE","priority":"P0","phase":"review","dependsOn":["T-100","T-200"]},
-    {"id":"T-400","title":"Final QA and release","owner":"qa-release-agent","status":"RUNNING","priority":"P0","phase":"release","dependsOn":["T-300"]}
+    {"id":"T-400","title":"Final QA and release","owner":"qa-release-agent","status":"DONE","priority":"P0","phase":"release","dependsOn":["T-300"]}
   ],
   "gates": {"runtime":"PASS","contracts":"PASS","security":"PASS","predeploy":"PASS_PRIVATE_BETA","public":"NOT_APPLICABLE_PRIVATE"},
   "openIssues": []

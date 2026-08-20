@@ -14,4 +14,5 @@
 - Verification: 54 unit/integration tests, 11 Workers SQLite DO tests, 56 browser E2E tests, build, lint, typecheck, secret scan and runtime gate PASS
 - Security re-review: APPROVE; zero open CRITICAL/MAJOR
 - PRD/release code re-review: APPROVE; zero open CRITICAL/MAJOR
-- Next critical task: publish the release commit and confirm hosted GitHub CI
+- Hosted GitHub CI: SUCCESS for release commit `56244c9`, run `32333174381`
+- Next critical task: none; private-beta release complete
