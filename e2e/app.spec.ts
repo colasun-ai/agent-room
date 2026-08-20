@@ -50,11 +50,12 @@ async function installTurnScripts(page: Page, scripts: TurnScript[]) {
 }
 
 async function installControlApi(page: Page, options: { turnstile?: boolean } = {}) {
-  const state = { revision: 1, registers: 0, controls: [] as Array<Record<string, unknown>>, skips: 0, sessions: [] as Array<Record<string, unknown>>, challengeAction: undefined as string | undefined }
+  const state = { revision: 1, registers: 0, controls: [] as Array<Record<string, unknown>>, skips: 0, cancels: 0, sessions: [] as Array<Record<string, unknown>>, challengeAction: undefined as string | undefined }
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
-    if (path === '/api/config') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ releaseClass: 'PUBLIC_BETA', protocolTag: 'agentroom.v1', controlSchemaRevision: 1, aiEnabled: true, capacityState: 'available', limits: { agentsMin: 2, agentsMax: 6, turnLimits: [6, 12, 20] }, ...(options.turnstile ? { turnstileSiteKey: 'test-site-key' } : {}) }) })
+    if (path === '/api/access') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true }) })
+    if (path === '/api/config') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ releaseClass: 'PRIVATE_BETA', protocolTag: 'agentroom.v1', controlSchemaRevision: 1, aiEnabled: true, capacityState: 'available', limits: { agentsMin: 2, agentsMax: 6, turnLimits: [6, 12, 20] }, ...(options.turnstile ? { turnstileSiteKey: 'test-site-key' } : {}) }) })
     if (path === '/api/session') {
       state.sessions.push((request.postDataJSON() ?? {}) as Record<string, unknown>)
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ expiresAt: Date.now() + 86_400_000 }) })
@@ -75,6 +76,7 @@ async function installControlApi(page: Page, options: { turnstile?: boolean } = 
       state.skips += 1; state.revision += 1
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ controlRevision: state.revision, runTurnsCompleted: 1, totalTurnsCompleted: 1 }) })
     }
+    if (path.endsWith('/cancel')) { state.cancels += 1; return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) }) }
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
   })
   return state
@@ -94,6 +96,30 @@ async function clickRoomControl(page: Page, name: string | RegExp) {
   if (await menu.isVisible()) await menu.click()
   await page.getByRole('button', { name }).click()
 }
+
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/access', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true }) }))
+})
+
+test('requires and verifies the private beta access password', async ({ page }) => {
+  await page.unroute('**/api/access')
+  let authenticated = false
+  await page.route('**/api/access', async (route) => {
+    if (route.request().method() === 'POST') {
+      authenticated = (route.request().postDataJSON() as { password?: string }).password === 'browser-test-password'
+      return route.fulfill({ status: authenticated ? 200 : 401, contentType: 'application/json', body: authenticated ? JSON.stringify({ authenticated: true, expiresAt: Date.now() + 60_000 }) : JSON.stringify({ error: { code: 'ACCESS_REQUIRED', message: 'ACCESS_REQUIRED', retryable: false } }) })
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated }) })
+  })
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: /Enter the room/ })).toBeVisible()
+  await page.getByLabel(/Access password/).fill('wrong')
+  await page.getByRole('button', { name: /Enter/ }).click()
+  await expect(page.getByRole('alert')).toContainText(/Incorrect password/)
+  await page.getByLabel(/Access password/).fill('browser-test-password')
+  await page.getByRole('button', { name: /Enter/ }).click()
+  await expect(page.getByRole('heading', { level: 1 })).toContainText(/Create agents|创建 Agent/)
+})
 
 test('landing, template setup, and responsive navigation are usable', async ({ page }) => {
   await page.goto('/')
@@ -142,6 +168,7 @@ test('creates a room, trusts streamed speaker, pauses, edits, and restores Index
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
+    if (path === '/api/access') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true }) })
     if (path === '/api/session') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ expiresAt: Date.now() + 86_400_000 }) })
     if (path === '/api/rooms/register') {
       registerBody = request.postDataJSON() as Record<string, unknown>
@@ -332,6 +359,7 @@ test('stops a queued request and synchronizes the paused room', async ({ page })
   await clickRoomControl(page, 'Stop current turn')
   await expect(page.locator('.message[data-status="stopped"]')).toBeVisible()
   await expect(page.getByText('PAUSED')).toBeVisible()
+  await expect.poll(() => apiState.cancels).toBe(1)
   expect(apiState.controls.some((item) => item.action === 'pause')).toBe(true)
 })
 
@@ -341,7 +369,7 @@ test('blocks double-submit and presents a stable 429 capacity message', async ({
   await page.goto('/new?template=startup')
   await page.getByText('Create & start', { exact: false }).evaluate((button: HTMLElement) => { button.click(); button.click() })
   await expect(page).toHaveURL(/\/room\//)
-  await expect(page.getByText('Shared public AI capacity is temporarily limited.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Private beta AI capacity is temporarily limited.', { exact: false })).toBeVisible()
   expect(apiState.registers).toBe(1)
 })
 
@@ -357,7 +385,7 @@ test('recovers an existing room through Turnstile and explains daily exhaustion'
   await expect(page.getByText('A quick verification is required', { exact: false })).toBeVisible()
   await page.getByRole('button', { name: 'Verify' }).click()
   await expect.poll(() => apiState.sessions.some((body) => body.challengeToken === 'verified-token')).toBe(true)
-  await expect(page.getByText('Today’s shared public AI allowance has been used.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Today’s private beta AI allowance has been used.', { exact: false })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Source code' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Deploy your own' })).toBeVisible()
 })

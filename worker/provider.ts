@@ -1,6 +1,6 @@
 import type { ProviderMessage } from './prompt'
 
-export type ProviderEvent = { type: 'content'; delta: string } | { type: 'usage'; inputTokens?: number; outputTokens?: number }
+export type ProviderEvent = { type: 'content'; delta: string } | { type: 'progress' } | { type: 'usage'; inputTokens?: number; outputTokens?: number }
 
 export class ProviderError extends Error {
   constructor(
@@ -60,6 +60,8 @@ export async function* parseNvidiaSse(stream: ReadableStream<Uint8Array>, signal
           let parsed: { choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } }
           try { parsed = JSON.parse(data) as typeof parsed } catch { throw new ProviderError('malformed') }
           const delta = parsed.choices?.[0]?.delta?.content
+          const reasoning = parsed.choices?.[0]?.delta?.reasoning_content
+          if (typeof reasoning === 'string' && reasoning.length > 0) yield { type: 'progress' }
           if (typeof delta === 'string' && delta.length > 0) yield { type: 'content', delta }
           if (parsed.usage) yield { type: 'usage', inputTokens: parsed.usage.prompt_tokens, outputTokens: parsed.usage.completion_tokens }
         }
@@ -123,7 +125,8 @@ export class NvidiaProvider {
     const firstToken = timeoutSignal(this.options.firstTokenTimeoutMs ?? 20_000, total.signal)
     try {
       for await (const event of parseNvidiaSse(response.body, firstToken.signal, this.options.idleTimeoutMs ?? 30_000)) {
-        if (event.type === 'content') { visible = true; firstToken.clear() }
+        if (event.type === 'content') visible = true
+        firstToken.clear()
         yield event
       }
     } catch (error) {

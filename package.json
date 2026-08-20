@@ -21,7 +21,8 @@
     "predeploy": "npm run check && npm run build && npm run security:scan && npm run runtime:gate",
     "deploy": "npm run build && wrangler deploy -c dist/agent_room/wrangler.json",
     "runtime:status": "node scripts/runtime/status.mjs",
-    "runtime:gate": "node scripts/runtime/gate.mjs"
+    "runtime:gate": "node scripts/runtime/gate.mjs",
+    "smoke:private": "node scripts/runtime/private-smoke.mjs"
   },
   "dependencies": {
     "idb": "^8.0.3",

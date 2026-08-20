@@ -33,6 +33,20 @@ export class FairQueue<T = unknown> {
     return undefined
   }
 
+  removeWhere(predicate: (ticket: QueueTicket<T>) => boolean): QueueTicket<T>[] {
+    const removed: QueueTicket<T>[] = []
+    for (const [sessionId, rooms] of this.sessions) {
+      for (const [roomId, tickets] of rooms) {
+        for (let index = tickets.length - 1; index >= 0; index -= 1) {
+          if (predicate(tickets[index])) removed.push(...tickets.splice(index, 1))
+        }
+        if (tickets.length === 0) rooms.delete(roomId)
+      }
+      if (rooms.size === 0) { this.sessions.delete(sessionId); this.roomCursors.delete(sessionId) }
+    }
+    return removed
+  }
+
   dequeue(): QueueTicket<T> | undefined {
     const sessionIds = [...this.sessions.keys()]
     if (sessionIds.length === 0) return undefined

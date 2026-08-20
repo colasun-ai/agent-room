@@ -37,7 +37,7 @@ export function useRoomController(roomId: string) {
   const [challengeSiteKey, setChallengeSiteKey] = useState<string>()
   const [challengeVerifying, setChallengeVerifying] = useState(false)
   const [challengeRequired, setChallengeRequired] = useState(false)
-  const activeRequest = useRef<{ controller: AbortController; messageId: string } | undefined>(undefined)
+  const activeRequest = useRef<{ controller: AbortController; messageId: string; serverTurnId?: string } | undefined>(undefined)
   const phase = useRef<'idle' | 'waiting' | 'streaming'>('idle')
   const challengeRetry = useRef<(() => Promise<unknown>) | undefined>(undefined)
   const startTurnRef = useRef<(retryOfServerTurnId?: string) => Promise<void>>(async () => undefined)
@@ -141,7 +141,7 @@ export function useRoomController(roomId: string) {
         if (completed) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'The stream continued after its terminal event.')
         if (event.type === 'queued') {
           if (started) throw new AgentRoomApiError('PROTOCOL_MISMATCH', 'A queued event arrived after generation started.')
-          serverTurnId = event.serverTurnId; setBusy(event.queueState === 'busy')
+          serverTurnId = event.serverTurnId; if (activeRequest.current) activeRequest.current.serverTurnId = serverTurnId; setBusy(event.queueState === 'busy')
           message = { ...message, status: 'waiting', serverTurnId, updatedAt: Date.now() }
           await writer.finish(message); commitBundle((value) => ({ ...value, messages: value.messages.map((item) => item.id === messageId ? message : item) }))
         } else if (event.type === 'start') {
@@ -255,9 +255,13 @@ export function useRoomController(roomId: string) {
   }, [commitBundle, register, roomId])
 
   const stop = useCallback(async () => {
-    activeRequest.current?.controller.abort()
+    const request = activeRequest.current
+    request?.controller.abort()
+    if (request?.serverTurnId) {
+      try { await api.cancel(roomId, request.serverTurnId) } catch (error) { await reportError(error, () => api.cancel(roomId, request.serverTurnId!)) }
+    }
     try { await setRoomStatus('paused') } catch (error) { await reportError(error, () => setRoomStatus('paused')) }
-  }, [reportError, setRoomStatus])
+  }, [reportError, roomId, setRoomStatus])
 
   const sendUserMessage = useCallback(async (content: string) => {
     const current = bundleRef.current

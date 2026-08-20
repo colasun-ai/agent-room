@@ -27,6 +27,26 @@ const roster = [
 afterEach(() => reset())
 
 describe('SQLite ControlPlane integration', () => {
+  it('rate-limits repeated access password failures and clears failures after success', async () => {
+    const stub = newStub(), now = Date.now(), riskKey = 'access-risk-key-0001'
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect((await post(stub, '/access/check', { riskKey, success: false, now: now + attempt })).status).toBe(401)
+    }
+    expect((await post(stub, '/access/check', { riskKey, success: false, now: now + 4 })).status).toBe(429)
+    expect((await post(stub, '/access/check', { riskKey, success: true, now: now + 5 })).status).toBe(429)
+    expect((await post(stub, '/access/check', { riskKey, success: true, now: now + 15 * 60_000 + 5 })).status).toBe(200)
+    expect((await post(stub, '/access/check', { riskKey, success: false, now: now + 15 * 60_000 + 6 })).status).toBe(401)
+  })
+
+  it('accepts a password-verified private session after the public risk threshold', async () => {
+    const stub = newStub(), now = Date.now(), riskKey = 'private-risk-key-0001'
+    for (let index = 0; index < 3; index += 1) {
+      expect((await post(stub, '/session/create', { ...session(now + index, `session-000${index}`), riskKey })).status).toBe(200)
+    }
+    expect((await post(stub, '/session/create', { ...session(now + 3, 'session-denied'), riskKey })).status).toBe(403)
+    expect((await post(stub, '/session/create', { ...session(now + 4, 'session-private'), riskKey, accessVerified: true })).status).toBe(200)
+  })
+
   it('enforces one running room per session and persists the gate across eviction', async () => {
     const id = namespace.idFromName(crypto.randomUUID()), stub = namespace.get(id), now = Date.now()
     expect((await post(stub, '/session/create', session(now))).status).toBe(200)
@@ -50,6 +70,47 @@ describe('SQLite ControlPlane integration', () => {
     await expect(finished.json()).resolves.toMatchObject({ controlRevision: 2, runTurnsCompleted: 1, totalTurnsCompleted: 1 })
     const states = await runInDurableObject(stub, (_instance, state) => [...state.storage.sql.exec<{ key: string; status: string }>('SELECT key,status FROM idempotency ORDER BY key')])
     expect(states).toEqual([{ key: 'turn-key-0001', status: 'error' }, { key: 'turn-key-0002', status: 'done' }])
+  })
+
+  it('cancels an owned live turn and permits an immediate same-speaker retry', async () => {
+    const stub = newStub(), now = Date.now()
+    await post(stub, '/session/create', session(now))
+    await post(stub, '/rooms/register', { sessionId: 'session-0001', roomId: 'room-cancel', runId: 'run-00001', turnLimit: 6, roster, now })
+    const begun = await (await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0001', idempotencyKey: 'turn-key-0001', roomId: 'room-cancel', runId: 'run-00001', now })).json<Json>()
+    await expect((await post(stub, '/turn/cancel', { sessionId: 'session-0001', roomId: 'room-cancel', serverTurnId: begun.serverTurnId, now: now + 1 })).json()).resolves.toMatchObject({ ok: true, cancelled: true })
+    const retried = await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0002', idempotencyKey: 'turn-key-0002', roomId: 'room-cancel', runId: 'run-00001', retryOfServerTurnId: begun.serverTurnId, now: now + 2 })
+    expect(retried.status).toBe(200)
+    await expect(retried.json()).resolves.toMatchObject({ speakerId: begun.speakerId })
+  })
+
+  it('atomically removes an acquired permit and rejects stale acquisition after cancellation', async () => {
+    const stub = newStub(), now = Date.now()
+    await post(stub, '/session/create', session(now))
+    await post(stub, '/rooms/register', { sessionId: 'session-0001', roomId: 'room-cancel', runId: 'run-00001', turnLimit: 6, roster, now })
+    const begun = await (await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0001', idempotencyKey: 'turn-key-0001', roomId: 'room-cancel', runId: 'run-00001', now })).json<Json>()
+    expect((await post(stub, '/quota/acquire', { sessionId: 'session-0001', roomId: 'room-cancel', serverTurnId: begun.serverTurnId, retry: false, now })).status).toBe(200)
+    await post(stub, '/turn/cancel', { sessionId: 'session-0001', roomId: 'room-cancel', serverTurnId: begun.serverTurnId, now: now + 1 })
+    const permits = await runInDurableObject(stub, (_instance, state) => [...state.storage.sql.exec('SELECT lease_id FROM permits')].length)
+    expect(permits).toBe(0)
+    expect((await post(stub, '/turn/finish', { sessionId: 'session-0001', roomId: 'room-cancel', leaseId: begun.leaseId, serverTurnId: begun.serverTurnId, mentions: [], now: now + 2 })).status).toBe(409)
+    const room = await runInDurableObject(stub, (_instance, state) => JSON.parse([...state.storage.sql.exec<{ data: string }>('SELECT data FROM rooms WHERE room_id=?', 'room-cancel')][0].data) as Json)
+    expect(room).toMatchObject({ runTurnsCompleted: 0, totalTurnsCompleted: 0 })
+    expect((await post(stub, '/quota/acquire', { sessionId: 'session-0001', roomId: 'room-cancel', serverTurnId: begun.serverTurnId, retry: false, now: now + 2 })).status).toBe(499)
+  })
+
+  it('removes a cancelled turn from the in-memory quota queue', async () => {
+    const stub = newStub(), now = Date.now()
+    await post(stub, '/session/create', session(now))
+    await post(stub, '/rooms/register', { sessionId: 'session-0001', roomId: 'room-cancel', runId: 'run-00001', turnLimit: 6, roster, now })
+    const begun = await (await post(stub, '/turn/begin', { sessionId: 'session-0001', requestId: 'request-0001', idempotencyKey: 'turn-key-0001', roomId: 'room-cancel', runId: 'run-00001', now })).json<Json>()
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec('INSERT INTO permits(lease_id,server_turn_id,session_id,room_id,expires_at) VALUES(?,?,?,?,?)', 'occupied-1', 'other-turn-1', 'other-session-1', 'other-room-1', now + 60_000)
+      state.storage.sql.exec('INSERT INTO permits(lease_id,server_turn_id,session_id,room_id,expires_at) VALUES(?,?,?,?,?)', 'occupied-2', 'other-turn-2', 'other-session-2', 'other-room-2', now + 60_000)
+    })
+    const waiting = post(stub, '/quota/acquire', { sessionId: 'session-0001', roomId: 'room-cancel', serverTurnId: begun.serverTurnId, retry: false, now })
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    await post(stub, '/turn/cancel', { sessionId: 'session-0001', roomId: 'room-cancel', serverTurnId: begun.serverTurnId, now: now + 1 })
+    expect((await waiting).status).toBe(499)
   })
 
   it('records pause during a live turn and retains it after completion', async () => {

@@ -127,3 +127,8 @@ export function validateSkip(value: unknown): { idempotencyKey: string; controlR
     latestUserDirectAddress: data.latestUserDirectAddress === undefined ? undefined : text(data.latestUserDirectAddress, 200, true),
   }
 }
+
+export function validateCancel(value: unknown): { serverTurnId: string } {
+  const data = object(value)
+  return { serverTurnId: id(data.serverTurnId) }
+}

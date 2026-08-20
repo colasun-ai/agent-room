@@ -19,10 +19,44 @@ function environment(fetchImpl?: (request: Request) => Promise<Response>): Env {
 }
 
 describe('Worker HTTP integration', () => {
+  it('requires the developer password in production and issues a secure access cookie', async () => {
+    let sessionCreate: Record<string, unknown> | undefined
+    const env = environment(async (request) => {
+      const path = new URL(request.url).pathname
+      if (path === '/access/check') {
+        const body = await request.json<{ success?: boolean }>()
+        return body.success ? Response.json({ allowed: true }) : Response.json({ error: { code: 'ACCESS_REQUIRED', retryable: false } }, { status: 401 })
+      }
+      if (path === '/session/create') { sessionCreate = await request.json<Record<string, unknown>>(); return Response.json({ ok: true }) }
+      if (path === '/status') return Response.json({})
+      return Response.json({ ok: true })
+    })
+    env.ENVIRONMENT = 'production'
+    env.ACCESS_PASSWORD = 'test-access-password'
+    env.ACCESS_HMAC_SECRET = 'access-secret-at-least-long'
+
+    const status = await handleRequest(new Request('https://worker.test/api/access'), env)
+    await expect(status.json()).resolves.toEqual({ authenticated: false })
+    expect((await handleRequest(new Request('https://worker.test/api/config'), env)).status).toBe(401)
+
+    const denied = await handleRequest(new Request('https://worker.test/api/access', { method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) }), env)
+    expect(denied.status).toBe(401)
+    const granted = await handleRequest(new Request('https://worker.test/api/access', { method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ password: env.ACCESS_PASSWORD }) }), env)
+    expect(granted.status).toBe(200)
+    expect(granted.headers.get('set-cookie')).toContain('__Host-ar_access=')
+    expect(granted.headers.get('set-cookie')).toContain('HttpOnly; Secure; SameSite=Strict')
+    const cookie = granted.headers.get('set-cookie')!.split(';', 1)[0]
+    const config = await handleRequest(new Request('https://worker.test/api/config', { headers: { cookie } }), env)
+    expect(config.status).toBe(200)
+    const session = await handleRequest(new Request('https://worker.test/api/session', { method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, cookie, 'content-type': 'application/json' }, body: '{}' }), env)
+    expect(session.status).toBe(200)
+    expect(sessionCreate?.accessVerified).toBe(true)
+  })
+
   it('serves only public config and security headers without requiring Origin', async () => {
     const response = await handleRequest(new Request('https://worker.test/api/config'), environment())
     const body = await response.json<Record<string, unknown>>()
-    expect(body).toMatchObject({ releaseClass: 'PUBLIC_BETA', protocolTag: 'agentroom.v1', aiEnabled: true })
+    expect(body).toMatchObject({ releaseClass: 'PRIVATE_BETA', protocolTag: 'agentroom.v1', aiEnabled: true })
     expect(body).not.toHaveProperty('model')
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(response.headers.get('x-content-type-options')).toBe('nosniff')
@@ -66,6 +100,60 @@ describe('Worker HTTP integration', () => {
     expect(skipBody).toMatchObject({ controlRevision: 7, serverTurnId: '11111111-1111-4111-8111-111111111111' })
   })
 
+  it('authorizes explicit cancellation through the signed session and room path', async () => {
+    let cancelBody: Record<string, unknown> | undefined
+    const env = environment(async (request) => {
+      if (new URL(request.url).pathname === '/turn/cancel') { cancelBody = await request.json<Record<string, unknown>>(); return Response.json({ ok: true }) }
+      return Response.json({})
+    })
+    const cookie = await issueSession({ sessionId: 'session-id', expiresAt: Date.now() + 60_000 }, env.SESSION_HMAC_SECRET)
+    const response = await handleRequest(new Request('https://worker.test/api/rooms/room-0001/cancel', {
+      method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, cookie: `ar_session=${cookie}`, 'content-type': 'application/json' }, body: JSON.stringify({ serverTurnId: 'server-turn-0001' }),
+    }), env)
+    expect(response.status).toBe(200)
+    expect(cancelBody).toMatchObject({ sessionId: 'session-id', roomId: 'room-0001', serverTurnId: 'server-turn-0001' })
+  })
+
+  it('does not abort an in-isolate stream until the coordinator authorizes cancellation', async () => {
+    const serverTurnId = '11111111-1111-4111-8111-111111111111'
+    const env = environment(async (request) => {
+      const path = new URL(request.url).pathname
+      if (path === '/session/validate') return Response.json({ ok: true })
+      if (path === '/turn/begin') return Response.json({ serverTurnId, leaseId: '22222222-2222-4222-8222-222222222222', speakerId: 'agent-0001', speakerNameKey: 'alex', boosted: false, queueState: 'short', expiresAt: Date.now() + 60_000 })
+      if (path === '/quota/acquire') return Response.json({ leaseId: 'quota-lease', expiresAt: Date.now() + 60_000 })
+      if (path === '/turn/cancel') {
+        const body = await request.json<{ roomId?: string }>()
+        const cancelled = body.roomId === 'room-0001'
+        return Response.json({ ok: true, cancelled }, { headers: { 'x-agentroom-cancelled': cancelled ? '1' : '0' } })
+      }
+      return Response.json({ ok: true })
+    })
+    env.MOCK_UPSTREAM = 'false'; env.NVIDIA_API_KEY = 'not-a-real-key'
+    let upstreamAborted = false
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise<Response>((_resolve, reject) => {
+      if (init?.signal?.aborted) { upstreamAborted = true; reject(init.signal.reason); return }
+      init?.signal?.addEventListener('abort', () => { upstreamAborted = true; reject(init.signal?.reason) }, { once: true })
+    }))
+    try {
+      const cookie = await issueSession({ sessionId: 'session-id', expiresAt: Date.now() + 60_000 }, env.SESSION_HMAC_SECRET)
+      const headers = { origin: env.PUBLIC_ORIGIN, cookie: `ar_session=${cookie}`, 'content-type': 'application/json' }
+      const turnBody = {
+        requestId: '33333333-3333-4333-8333-333333333333', idempotencyKey: '44444444-4444-4444-8444-444444444444', roomId: 'room-0001', runId: 'run-00001', protocolTag: 'agentroom.v1', appBuildId: 'test-build', topic: 'Wait for cancellation.',
+        agents: [{ id: 'agent-0001', name: 'Alex', role: 'PM', avatar: 'A', personality: 'direct', goal: 'wait', enabled: true }, { id: 'agent-0002', name: 'Maya', role: 'Engineer', avatar: 'M', personality: 'careful', goal: 'review', enabled: true }], messages: [],
+      }
+      const turnResponse = await handleRequest(new Request('https://worker.test/api/rooms/room-0001/turn', { method: 'POST', headers, body: JSON.stringify(turnBody) }), env)
+      const reader = turnResponse.body!.getReader()
+      await vi.waitFor(() => expect(upstream).toHaveBeenCalledTimes(1))
+      const denied = await handleRequest(new Request('https://worker.test/api/rooms/other-room/cancel', { method: 'POST', headers, body: JSON.stringify({ serverTurnId }) }), env)
+      expect(denied.status).toBe(200)
+      expect(upstreamAborted).toBe(false)
+      const authorized = await handleRequest(new Request('https://worker.test/api/rooms/room-0001/cancel', { method: 'POST', headers, body: JSON.stringify({ serverTurnId }) }), env)
+      expect(authorized.status).toBe(200)
+      await vi.waitFor(() => expect(upstreamAborted).toBe(true))
+      await reader.cancel()
+    } finally { upstream.mockRestore() }
+  })
+
   it('requires a successful hostname/action-bound Siteverify before accepting a challenge', async () => {
     let createBody: Record<string, unknown> | undefined
     const env = environment(async (request) => {
@@ -82,6 +170,7 @@ describe('Worker HTTP integration', () => {
       expect(response.status).toBe(200)
       expect(response.headers.get('set-cookie')).toContain('HttpOnly')
       expect(createBody?.challengeHash).toEqual(expect.any(String))
+      expect(createBody?.accessVerified).toBe(false)
       expect(JSON.stringify(createBody)).not.toContain('single-use-token')
     } finally { upstream.mockRestore() }
   })

@@ -15,6 +15,8 @@ export interface Env {
   MAX_CONCURRENT_UPSTREAM: string
   EFFECTIVE_DAILY_ATTEMPT_LIMIT?: string
   SESSION_HMAC_SECRET: string
+  ACCESS_PASSWORD?: string
+  ACCESS_HMAC_SECRET?: string
   RISK_HMAC_SECRET?: string
   TURNSTILE_SECRET_KEY?: string
   TURNSTILE_SITE_KEY?: string

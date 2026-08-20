@@ -6,11 +6,29 @@ function sse(parts: string[]): ReadableStream<Uint8Array> {
 }
 
 describe('NVIDIA SSE adapter', () => {
-  it('parses split frames and discards reasoning', async () => {
+  it('parses split frames and turns hidden reasoning into content-free progress', async () => {
     const stream = sse(['data: {"choices":[{"delta":{"reasoning_content":"secret","content":"hel', 'lo"}}]}\n\ndata: [DONE]\n\n'])
     const events = []
     for await (const event of parseNvidiaSse(stream)) events.push(event)
-    expect(events).toEqual([{ type: 'content', delta: 'hello' }])
+    expect(events).toEqual([{ type: 'progress' }, { type: 'content', delta: 'hello' }])
+    expect(JSON.stringify(events)).not.toContain('secret')
+  })
+
+  it('uses hidden reasoning progress to satisfy the upstream first-event timeout', async () => {
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"reasoning_content":"hidden"}}]}\n\n'))
+        setTimeout(() => {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"visible"}}]}\n\ndata: [DONE]\n\n'))
+          controller.close()
+        }, 30)
+      },
+    })
+    const provider = new NvidiaProvider({ baseUrl: 'https://nvidia.test/v1', apiKey: 'secret', model: 'one-model', maxOutputTokens: 50, fetcher: async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } }), firstTokenTimeoutMs: 10, idleTimeoutMs: 100, totalTimeoutMs: 200 })
+    const events = []
+    for await (const event of provider.streamChat([], new AbortController().signal)) events.push(event)
+    expect(events).toEqual([{ type: 'progress' }, { type: 'content', delta: 'visible' }])
   })
 
   it('normalizes 429 and retry-after without exposing upstream bodies', async () => {

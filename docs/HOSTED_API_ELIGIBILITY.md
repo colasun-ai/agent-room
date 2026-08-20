@@ -1,8 +1,10 @@
 # NVIDIA hosted API eligibility
 
-Audit date: 2026-08-19. Release classification: **PUBLIC_BETA**. Public inference eligibility: **BLOCKED under Trial Terms**.
+Original public-release audit date: 2026-08-19. Anonymous public inference eligibility: **BLOCKED under Trial Terms**.
 
-NVIDIA's official GLM-5.2 page says the model itself is ready for commercial or non-commercial use, but separately identifies the hosted endpoint as a trial service governed by the NVIDIA API Trial Terms. These are different legal layers.
+Deployment update, 2026-08-20: the hosted instance is now classified **PRIVATE_BETA** and protected by a server-verified password for authorized developers. NVIDIA inference in this deployment is restricted to development and evaluation; anonymous public inference remains disabled as a release model. This restriction does not itself grant broader production or public-serving rights.
+
+NVIDIA's model catalog links model-specific terms separately from the hosted endpoint's NVIDIA API Trial Terms. These are different legal layers.
 
 The current Trial Terms state:
 
@@ -14,7 +16,7 @@ Therefore a maintainer trial key is not sufficient evidence for an anonymous pub
 
 Official sources:
 
-- [NVIDIA Build GLM-5.2](https://build.nvidia.com/z-ai/glm-5.2)
+- [NVIDIA Build Llama 3.1 8B Instruct](https://build.nvidia.com/meta/llama-3_1-8b-instruct)
 - [NVIDIA API Trial Terms of Service](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf)
 
 Required evidence before enabling public inference:
@@ -23,4 +25,3 @@ Required evidence before enabling public inference:
 2. Deployment-scoped key is installed only as a Cloudflare secret.
 3. Account quota and observed RPM are verified with a small smoke test.
 4. Model and hosted terms remain compatible on release day.
-

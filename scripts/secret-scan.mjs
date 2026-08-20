@@ -19,8 +19,8 @@ includeGenerated(join(process.cwd(), '.agent-runtime'))
 
 const prefixedSecret = /\b(?:nvapi-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b/g
 const privateKey = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g
-const assignment = /\b(NVIDIA_API_KEY|SESSION_HMAC_SECRET|RISK_HMAC_SECRET|TURNSTILE_SECRET_KEY|SMOKE_TEST_SECRET)\b[ \t]*(?:=|:)[ \t]*["']?([^"',;\s}]+)/g
-const placeholders = /^(?:replace-with-[a-z0-9-]*|not-a-real-key|session-secret-at-least-long|risk-secret-at-least-long|turnstile-secret|test-value|placeholder|example)$/i
+const assignment = /["']?\b(NVIDIA_API_KEY|SESSION_HMAC_SECRET|RISK_HMAC_SECRET|ACCESS_PASSWORD|ACCESS_HMAC_SECRET|TURNSTILE_SECRET_KEY|SMOKE_TEST_SECRET)\b["']?[ \t]*(?:=|:)[ \t]*["']?([^"',;\s}]+)/g
+const placeholders = /^(?:replace-with-[a-z0-9-]*|not-a-real-key|session-secret-at-least-long|risk-secret-at-least-long|access-secret-at-least-long|test-access-password|turnstile-secret|test-value|placeholder|example)$/i
 const findings = new Set()
 
 function scan(label, content) {

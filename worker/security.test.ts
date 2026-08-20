@@ -1,8 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { hmac, normalizeNetworkRiskSource, trustedRequest } from './security'
+import { hmac, issueAccess, normalizeNetworkRiskSource, readAccess, secretsEqual, trustedRequest } from './security'
 import type { Env } from './types'
 
 describe('network risk source normalization', () => {
+  it('compares access passwords and accepts only signed, unexpired access cookies', async () => {
+    const secret = 'access-secret-at-least-long'
+    expect(await secretsEqual('developer-password', 'developer-password')).toBe(true)
+    expect(await secretsEqual('developer-password', 'different-password')).toBe(false)
+    const active = await issueAccess(Date.now() + 60_000, secret)
+    expect(await readAccess(new Request('https://app.test', { headers: { cookie: `__Host-ar_access=${active}` } }), secret)).toBe(true)
+    expect(await readAccess(new Request('https://app.test', { headers: { cookie: `__Host-ar_access=${active}x` } }), secret)).toBe(false)
+    const expired = await issueAccess(Date.now() - 1, secret)
+    expect(await readAccess(new Request('https://app.test', { headers: { cookie: `__Host-ar_access=${expired}` } }), secret)).toBe(false)
+  })
+
   it('groups IPv6 address rotation within one /64', () => {
     expect(normalizeNetworkRiskSource('2001:db8:abcd:12::1')).toBe('ipv6:2001:db8:abcd:12::/64')
     expect(normalizeNetworkRiskSource('2001:0db8:abcd:0012:ffff::99')).toBe('ipv6:2001:db8:abcd:12::/64')

@@ -2,11 +2,13 @@ import { CONTROL_SCHEMA_REVISION, PROTOCOL_TAG, type ApiError, type ErrorCode, t
 import { buildPrompt } from './prompt'
 import { NvidiaProvider, ProviderError } from './provider'
 import { parseMentions } from './scheduler'
-import { hmac, issueSession, normalizeNetworkRiskSource, readSession, trustedRequest, withSecurity } from './security'
+import { hmac, issueAccess, issueSession, normalizeNetworkRiskSource, readAccess, readSession, secretsEqual, trustedRequest, withSecurity } from './security'
 import type { Env, SessionIdentity, TurnBeginResult } from './types'
-import { readJson, validateControl, validateRegister, validateSkip, validateTurn } from './validation'
+import { readJson, validateCancel, validateControl, validateRegister, validateSkip, validateTurn } from './validation'
 
 const encoder = new TextEncoder()
+const ACCESS_MAX_AGE_SECONDS = 24 * 60 * 60
+const activeStreams = new Map<string, AbortController>()
 
 function apiError(code: ErrorCode, status: number, requestId?: string, retryable = false, retryAfterMs?: number): Response {
   const body: ApiError = { error: { code, message: code, requestId, retryable, retryAfterMs } }
@@ -35,6 +37,42 @@ async function requireSession(request: Request, env: Env): Promise<SessionIdenti
   return identity
 }
 
+function accessGateRequired(env: Env): boolean {
+  return env.ENVIRONMENT === 'production' || Boolean(env.ACCESS_PASSWORD || env.ACCESS_HMAC_SECRET)
+}
+
+function accessGateConfigured(env: Env): env is Env & { ACCESS_PASSWORD: string; ACCESS_HMAC_SECRET: string } {
+  return Boolean(env.ACCESS_PASSWORD && env.ACCESS_HMAC_SECRET)
+}
+
+async function accessStatus(request: Request, env: Env): Promise<Response> {
+  if (!accessGateRequired(env)) return Response.json({ authenticated: true })
+  if (!accessGateConfigured(env)) return Response.json({ authenticated: false })
+  return Response.json({ authenticated: await readAccess(request, env.ACCESS_HMAC_SECRET) })
+}
+
+async function unlockAccess(request: Request, env: Env): Promise<Response> {
+  if (request.headers.get('origin') !== env.PUBLIC_ORIGIN) return apiError('INVALID_REQUEST', 403)
+  if (!accessGateConfigured(env)) return apiError('SERVICE_UNAVAILABLE', 503, undefined, true)
+  let body: { password?: unknown } = {}
+  try { body = await readJson(request, 1_000) as typeof body } catch { return apiError('INVALID_REQUEST', 400) }
+  if (typeof body.password !== 'string' || body.password.length < 1 || body.password.length > 256) return apiError('INVALID_REQUEST', 400)
+  const valid = await secretsEqual(body.password, env.ACCESS_PASSWORD)
+  const networkSource = normalizeNetworkRiskSource(request.headers.get('cf-connecting-ip'))
+  const riskKey = await hmac(env.RISK_HMAC_SECRET ?? env.SESSION_HMAC_SECRET, `access:${networkSource}`)
+  const checked = await controlCall(env, '/access/check', { riskKey, success: valid, now: Date.now() })
+  if (!checked.ok) return forwardControl(checked)
+  const expiresAt = Date.now() + ACCESS_MAX_AGE_SECONDS * 1_000
+  const cookie = await issueAccess(expiresAt, env.ACCESS_HMAC_SECRET)
+  return Response.json({ authenticated: true, expiresAt }, { headers: { 'set-cookie': `__Host-ar_access=${cookie}; Path=/; Max-Age=${ACCESS_MAX_AGE_SECONDS}; HttpOnly; Secure; SameSite=Strict` } })
+}
+
+async function accessDecision(request: Request, env: Env): Promise<{ allowed: boolean; verified: boolean }> {
+  if (!accessGateRequired(env)) return { allowed: true, verified: false }
+  const verified = accessGateConfigured(env) && await readAccess(request, env.ACCESS_HMAC_SECRET)
+  return { allowed: verified, verified }
+}
+
 async function verifyTurnstile(token: string, request: Request, env: Env): Promise<boolean> {
   if (!env.TURNSTILE_SECRET_KEY) return false
   const form = new URLSearchParams({ secret: env.TURNSTILE_SECRET_KEY, response: token, idempotency_key: crypto.randomUUID() })
@@ -48,7 +86,7 @@ async function verifyTurnstile(token: string, request: Request, env: Env): Promi
   return result.success === true && result.hostname === expectedHostname && result.action === 'agentroom-session'
 }
 
-async function createSession(request: Request, env: Env): Promise<Response> {
+async function createSession(request: Request, env: Env, accessVerified: boolean): Promise<Response> {
   let body: { challengeToken?: unknown } = {}
   try { body = await readJson(request, 8_000) as typeof body } catch { return apiError('INVALID_REQUEST', 400) }
   const challengeToken = typeof body.challengeToken === 'string' ? body.challengeToken : undefined
@@ -73,7 +111,7 @@ async function createSession(request: Request, env: Env): Promise<Response> {
   const now = Date.now(), sessionId = crypto.randomUUID(), expiresAt = now + 24 * 60 * 60_000
   const networkSource = normalizeNetworkRiskSource(request.headers.get('cf-connecting-ip'))
   const riskKey = await hmac(env.RISK_HMAC_SECRET ?? env.SESSION_HMAC_SECRET, networkSource)
-  const created = await controlCall(env, '/session/create', { sessionId, riskKey, now, expiresAt, idleExpiresAt: now + 2 * 60 * 60_000, challengeHash })
+  const created = await controlCall(env, '/session/create', { sessionId, riskKey, now, expiresAt, idleExpiresAt: now + 2 * 60 * 60_000, challengeHash, accessVerified })
   if (!created.ok) return forwardControl(created)
   const cookie = await issueSession({ sessionId, expiresAt }, env.SESSION_HMAC_SECRET)
   return Response.json({ expiresAt }, { headers: { 'set-cookie': `ar_session=${cookie}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Strict` } })
@@ -85,7 +123,7 @@ async function config(env: Env): Promise<Response> {
   const credentialAvailable = Boolean(env.NVIDIA_API_KEY) || (env.ENVIRONMENT !== 'production' && env.MOCK_UPSTREAM === 'true')
   const enabled = env.AI_ENABLED === 'true' && env.DEFAULT_MODEL_ENABLED !== 'false' && credentialAvailable && !state.killed
   const capacityState = !enabled ? 'disabled' : state.dailyExhausted ? 'daily-exhausted' : state.cooldown || state.busy ? 'busy' : 'available'
-  return Response.json({ releaseClass: 'PUBLIC_BETA', protocolTag: PROTOCOL_TAG, controlSchemaRevision: CONTROL_SCHEMA_REVISION, aiEnabled: enabled, capacityState, limits: { agentsMin: 2, agentsMax: 6, turnLimits: [6, 12, 20] }, ...(env.TURNSTILE_SITE_KEY ? { turnstileSiteKey: env.TURNSTILE_SITE_KEY } : {}) })
+  return Response.json({ releaseClass: 'PRIVATE_BETA', protocolTag: PROTOCOL_TAG, controlSchemaRevision: CONTROL_SCHEMA_REVISION, aiEnabled: enabled, capacityState, limits: { agentsMin: 2, agentsMax: 6, turnLimits: [6, 12, 20] }, ...(env.TURNSTILE_SITE_KEY ? { turnstileSiteKey: env.TURNSTILE_SITE_KEY } : {}) })
 }
 
 async function register(request: Request, env: Env, session: SessionIdentity): Promise<Response> {
@@ -107,6 +145,16 @@ async function skip(request: Request, env: Env, session: SessionIdentity, roomId
   try { payload = validateSkip(await readJson(request, 10_000)) } catch { return apiError('INVALID_REQUEST', 400) }
   const response = await controlCall(env, '/rooms/skip', { ...payload, roomId, sessionId: session.sessionId, now: Date.now() })
   return response.ok ? new Response(response.body, response) : forwardControl(response)
+}
+
+async function cancel(request: Request, env: Env, session: SessionIdentity, roomId: string): Promise<Response> {
+  let payload
+  try { payload = validateCancel(await readJson(request, 2_000)) } catch { return apiError('INVALID_REQUEST', 400) }
+  const response = await controlCall(env, '/turn/cancel', { sessionId: session.sessionId, roomId, serverTurnId: payload.serverTurnId, now: Date.now() })
+  if (!response.ok) return forwardControl(response)
+  const cancelled = response.headers.get('x-agentroom-cancelled') === '1'
+  if (cancelled) { try { activeStreams.get(payload.serverTurnId)?.abort() } catch { /* durable cancellation already succeeded */ } }
+  return Response.json({ ok: true, cancelled })
 }
 
 function streamFrame(event: StreamEvent): Uint8Array {
@@ -147,6 +195,7 @@ async function turn(request: Request, env: Env, session: SessionIdentity, roomId
       let closed = false, committed = false, activePermit: string | undefined
       const aborter = new AbortController()
       streamAborter = aborter
+      activeStreams.set(begun.serverTurnId, aborter)
       const abort = () => aborter.abort(request.signal.reason)
       request.signal.addEventListener('abort', abort, { once: true })
       const send = (event: StreamEvent): void => { if (!closed) { try { controller.enqueue(streamFrame(event)) } catch { closed = true; aborter.abort() } } }
@@ -167,7 +216,7 @@ async function turn(request: Request, env: Env, session: SessionIdentity, roomId
               const messages = buildPrompt({ topic: payload.topic, agents: payload.agents, messages: payload.messages, speaker })
               for await (const event of provider.streamChat(messages, aborter.signal)) {
                 if (event.type === 'content') { visible = true; fullOutput += event.delta; send({ type: 'content', requestId: payload.requestId, serverTurnId: begun.serverTurnId, delta: event.delta }) }
-                else usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens }
+                else if (event.type === 'usage') usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens }
               }
               const mentions = parseMentions(fullOutput, roster, begun.speakerId)
               const finished = await controlCall(env, '/turn/finish', { sessionId: session.sessionId, roomId, leaseId: begun.leaseId, serverTurnId: begun.serverTurnId, mentions, now: Date.now() })
@@ -188,6 +237,7 @@ async function turn(request: Request, env: Env, session: SessionIdentity, roomId
           }
         } finally {
           if (!committed) await controlCall(env, '/turn/fail', { sessionId: session.sessionId, roomId, leaseId: begun.leaseId, serverTurnId: begun.serverTurnId, now: Date.now() }).catch(() => undefined)
+          if (activeStreams.get(begun.serverTurnId) === aborter) activeStreams.delete(begun.serverTurnId)
           request.signal.removeEventListener('abort', abort)
           close()
         }
@@ -205,20 +255,25 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
     response = request.headers.get('origin') === env.PUBLIC_ORIGIN ? new Response(null, { status: 204, headers: { 'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS', 'access-control-allow-headers': 'content-type, x-agentroom-smoke-timestamp, x-agentroom-smoke-signature', 'access-control-max-age': '600' } }) : apiError('INVALID_REQUEST', 403)
     return withSecurity(response, request, env)
   }
-  if (url.pathname === '/api/config' && request.method === 'GET') response = await config(env)
+  if (url.pathname === '/api/access' && request.method === 'GET') response = await accessStatus(request, env)
+  else if (url.pathname === '/api/access' && request.method === 'POST') response = await unlockAccess(request, env)
   else if (url.pathname.startsWith('/api/')) {
-    if (!(await trustedRequest(request, env))) response = apiError('INVALID_REQUEST', 403)
-    else if (url.pathname === '/api/session' && request.method === 'POST') response = await createSession(request, env)
+    const access = await accessDecision(request, env)
+    if (!access.allowed) response = apiError('ACCESS_REQUIRED', 401)
+    else if (url.pathname === '/api/config' && request.method === 'GET') response = await config(env)
+    else if (!(await trustedRequest(request, env))) response = apiError('INVALID_REQUEST', 403)
+    else if (url.pathname === '/api/session' && request.method === 'POST') response = await createSession(request, env, access.verified)
     else {
       const session = await requireSession(request, env)
       if (session instanceof Response) response = session
       else if (url.pathname === '/api/rooms/register' && request.method === 'POST') response = await register(request, env, session)
       else {
-        const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{8,64})\/(control|skip|turn)$/)
+        const match = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{8,64})\/(control|skip|turn|cancel)$/)
         if (!match) response = apiError('INVALID_REQUEST', 404)
         else if (match[2] === 'control' && request.method === 'PATCH') response = await control(request, env, session, match[1])
         else if (match[2] === 'skip' && request.method === 'POST') response = await skip(request, env, session, match[1])
         else if (match[2] === 'turn' && request.method === 'POST') response = await turn(request, env, session, match[1])
+        else if (match[2] === 'cancel' && request.method === 'POST') response = await cancel(request, env, session, match[1])
         else response = apiError('INVALID_REQUEST', 405)
       }
     }

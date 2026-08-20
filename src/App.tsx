@@ -233,7 +233,7 @@ function Settings({ t, language, setLanguage, theme, setTheme }: { t: ReturnType
 }
 
 function About({ t }: { t: ReturnType<typeof translator> }) {
-  return <main className="simple-page about-page"><p className="eyebrow">Open source · PUBLIC_BETA</p><h1>{t('about')}</h1><p className="about-lead">{t('aboutBody')}</p><div className="principles"><div><span>01</span><h2>{t('noSignup')}</h2><p>{t('anonymousExplain')}</p></div><div><span>02</span><h2>{t('localFirst')}</h2><p>{t('privacyText')}</p></div><div><span>03</span><h2>{t('sharedCapacity')}</h2><p>{t('capacityExplain')}</p></div></div><div className="about-actions"><a className="button primary" href="https://github.com/colasun-ai/agent-room" target="_blank" rel="noopener noreferrer">{t('source')} ↗</a><a className="button secondary" href="https://github.com/colasun-ai/agent-room#self-deploy" target="_blank" rel="noopener noreferrer">{t('deployOwn')} ↗</a></div></main>
+  return <main className="simple-page about-page"><p className="eyebrow">Open source · PRIVATE_BETA</p><h1>{t('about')}</h1><p className="about-lead">{t('aboutBody')}</p><div className="principles"><div><span>01</span><h2>{t('noSignup')}</h2><p>{t('anonymousExplain')}</p></div><div><span>02</span><h2>{t('localFirst')}</h2><p>{t('privacyText')}</p></div><div><span>03</span><h2>{t('sharedCapacity')}</h2><p>{t('capacityExplain')}</p></div></div><div className="about-actions"><a className="button primary" href="https://github.com/colasun-ai/agent-room" target="_blank" rel="noopener noreferrer">{t('source')} ↗</a><a className="button secondary" href="https://github.com/colasun-ai/agent-room#self-deploy" target="_blank" rel="noopener noreferrer">{t('deployOwn')} ↗</a></div></main>
 }
 
 export default function App() {

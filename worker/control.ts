@@ -8,7 +8,7 @@ type SqlRow = Record<string, SqlStorageValue>
 interface AcquirePayload { sessionId: string; roomId: string; serverTurnId: string; retry: boolean; now: number }
 interface Waiting { payload: AcquirePayload; resolve: (response: Response) => void; expiresAt: number; aborted: boolean }
 
-const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+const json = (value: unknown, status = 200, headers: Record<string, string> = {}): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers } })
 
 export class ControlPlane extends DurableObject<Env> {
   private readonly queue = new FairQueue<Waiting>()
@@ -37,6 +37,8 @@ export class ControlPlane extends DurableObject<Env> {
     sql.exec(`CREATE TABLE IF NOT EXISTS control_events (session_id TEXT NOT NULL, risk_key TEXT NOT NULL, at INTEGER NOT NULL)`)
     sql.exec(`CREATE INDEX IF NOT EXISTS control_events_session ON control_events(session_id, at)`)
     sql.exec(`CREATE INDEX IF NOT EXISTS control_events_risk ON control_events(risk_key, at)`)
+    sql.exec(`CREATE TABLE IF NOT EXISTS access_attempts (risk_key TEXT NOT NULL, at INTEGER NOT NULL)`)
+    sql.exec(`CREATE INDEX IF NOT EXISTS access_attempts_risk ON access_attempts(risk_key, at)`)
     sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`)
   }
 
@@ -110,6 +112,7 @@ export class ControlPlane extends DurableObject<Env> {
     sql.exec('DELETE FROM rooms WHERE expires_at <= ?', now)
     sql.exec('DELETE FROM challenge_tokens WHERE used_at <= ?', now - 10 * 60_000)
     sql.exec('DELETE FROM control_events WHERE at <= ?', now - 24 * 60 * 60_000)
+    sql.exec('DELETE FROM access_attempts WHERE at <= ?', now - 60 * 60_000)
     sql.exec('DELETE FROM room_pacing WHERE room_id NOT IN (SELECT room_id FROM rooms)')
   }
 
@@ -128,6 +131,7 @@ export class ControlPlane extends DurableObject<Env> {
     const body = request.method === 'GET' ? {} : await request.json<Record<string, unknown>>().catch(() => ({}))
     try {
       if (url.pathname === '/session/create') return this.createSession(body)
+      if (url.pathname === '/access/check') return this.checkAccess(body)
       if (url.pathname === '/session/exists') return this.sessionExists(body)
       if (url.pathname === '/session/verify') return this.verifySession(body)
       if (url.pathname === '/rooms/register') return this.registerRoom(body)
@@ -136,6 +140,7 @@ export class ControlPlane extends DurableObject<Env> {
       if (url.pathname === '/turn/begin') return this.beginTurn(body as unknown as TurnBeginRequest)
       if (url.pathname === '/turn/finish') return this.finishTurn(body)
       if (url.pathname === '/turn/fail') return this.failTurn(body)
+      if (url.pathname === '/turn/cancel') return this.cancelTurn(body)
       if (url.pathname === '/quota/acquire') return this.acquire(request, body as unknown as AcquirePayload)
       if (url.pathname === '/quota/release') return this.releasePermit(body)
       if (url.pathname === '/quota/cooldown') return this.setCooldown(body)
@@ -147,6 +152,20 @@ export class ControlPlane extends DurableObject<Env> {
     }
   }
 
+  private checkAccess(body: Record<string, unknown>): Response {
+    const now = Number(body.now), riskKey = String(body.riskKey ?? ''), success = body.success === true
+    if (!Number.isFinite(now) || riskKey.length < 16 || riskKey.length > 128) return this.error('INVALID_REQUEST', 400)
+    this.ctx.storage.sql.exec('DELETE FROM access_attempts WHERE at <= ?', now - 60 * 60_000)
+    const recent = Number(this.one('SELECT COUNT(*) count FROM access_attempts WHERE risk_key = ? AND at > ?', riskKey, now - 15 * 60_000)?.count ?? 0)
+    if (recent >= 5) return this.error('RATE_LIMITED', 429, 15 * 60_000)
+    if (success) {
+      this.ctx.storage.sql.exec('DELETE FROM access_attempts WHERE risk_key = ?', riskKey)
+      return json({ allowed: true })
+    }
+    this.ctx.storage.sql.exec('INSERT INTO access_attempts(risk_key,at) VALUES(?,?)', riskKey, now)
+    return recent >= 4 ? this.error('RATE_LIMITED', 429, 15 * 60_000) : this.error('ACCESS_REQUIRED', 401)
+  }
+
   private createSession(body: Record<string, unknown>): Response {
     const now = Number(body.now)
     const riskKey = String(body.riskKey ?? '')
@@ -154,13 +173,14 @@ export class ControlPlane extends DurableObject<Env> {
     this.cleanup(now)
     const recent = Number(this.one('SELECT COUNT(*) count FROM risk_events WHERE risk_key = ? AND at > ?', riskKey, now - 10 * 60_000)?.count ?? 0)
     const challengeHash = typeof body.challengeHash === 'string' ? body.challengeHash : undefined
-    if (recent >= 3 && !challengeHash) return this.error('CHALLENGE_REQUIRED', 403)
+    const accessVerified = body.accessVerified === true
+    if (recent >= 3 && !challengeHash && !accessVerified) return this.error('CHALLENGE_REQUIRED', 403)
     if (challengeHash) {
       if (this.one('SELECT token_hash FROM challenge_tokens WHERE token_hash = ?', challengeHash)) return this.error('CHALLENGE_REQUIRED', 403)
       this.ctx.storage.sql.exec('INSERT INTO challenge_tokens(token_hash,used_at) VALUES(?,?)', challengeHash, now)
     }
     this.ctx.storage.sql.exec('INSERT INTO risk_events(risk_key,at) VALUES(?,?)', riskKey, now)
-    this.ctx.storage.sql.exec('INSERT OR REPLACE INTO sessions(session_id,risk_key,expires_at,idle_expires_at,verified_until,created_at,last_seen) VALUES(?,?,?,?,?,?,?)', sessionId, riskKey, Number(body.expiresAt), Number(body.idleExpiresAt), challengeHash ? now + 60 * 60_000 : 0, now, now)
+    this.ctx.storage.sql.exec('INSERT OR REPLACE INTO sessions(session_id,risk_key,expires_at,idle_expires_at,verified_until,created_at,last_seen) VALUES(?,?,?,?,?,?,?)', sessionId, riskKey, Number(body.expiresAt), Number(body.idleExpiresAt), challengeHash || accessVerified ? now + 60 * 60_000 : 0, now, now)
     return json({ ok: true })
   }
 
@@ -317,6 +337,28 @@ export class ControlPlane extends DurableObject<Env> {
     return json({ ok: true })
   }
 
+  private cancelTurn(body: Record<string, unknown>): Response {
+    const sessionId = String(body.sessionId), roomId = String(body.roomId), serverTurnId = String(body.serverTurnId), now = Number(body.now)
+    if (!this.validSession(sessionId, now)) return this.error('SESSION_EXPIRED', 401)
+    const room = this.ownedRoom(roomId, sessionId)
+    if (!room) return this.error('ROOM_NOT_REGISTERED', 404)
+    if (!room.activeLease) return json({ ok: true, cancelled: false }, 200, { 'x-agentroom-cancelled': '0' })
+    if (room.activeLease.serverTurnId !== serverTurnId) return this.error('INVALID_REQUEST', 409)
+    const scope = `${sessionId}:${roomId}:turn`
+    const idem = this.activeTurnIdempotency(scope, serverTurnId)
+    if (idem?.speakerId) room.failedTurns[serverTurnId] = idem.speakerId
+    room.activeLease = undefined; room.updatedAt = now
+    this.ctx.storage.transactionSync(() => {
+      this.writeRoom(room)
+      if (idem) this.ctx.storage.sql.exec('UPDATE idempotency SET status=? WHERE scope=? AND key=?', 'error', scope, idem.key)
+      this.ctx.storage.sql.exec('DELETE FROM permits WHERE session_id=? AND room_id=? AND server_turn_id=?', sessionId, roomId, serverTurnId)
+    })
+    const waiting = this.queue.removeWhere((ticket) => ticket.sessionId === sessionId && ticket.roomId === roomId && ticket.value.payload.serverTurnId === serverTurnId)
+    for (const ticket of waiting) { ticket.value.aborted = true; ticket.value.resolve(this.error('REQUEST_ABORTED', 499)) }
+    this.schedulePump(0)
+    return json({ ok: true, cancelled: true }, 200, { 'x-agentroom-cancelled': '1' })
+  }
+
   private acquire(request: Request, payload: AcquirePayload): Promise<Response> | Response {
     if (!this.validSession(payload.sessionId, payload.now)) return this.error('SESSION_EXPIRED', 401)
     if (this.hasOtherRunningRoom(payload.sessionId, payload.roomId, payload.now)) return this.error('ROOM_BUSY', 409)
@@ -358,6 +400,10 @@ export class ControlPlane extends DurableObject<Env> {
 
   private tryReserve(payload: AcquirePayload, now: number): { granted: boolean; leaseId?: string; expiresAt?: number; terminal?: boolean; code?: string; status?: number; retryAfterMs?: number } {
     this.cleanup(now)
+    const room = this.ownedRoom(payload.roomId, payload.sessionId)
+    if (!this.validSession(payload.sessionId, now, false) || !room?.activeLease || room.activeLease.serverTurnId !== payload.serverTurnId) {
+      return { granted: false, terminal: true, code: 'REQUEST_ABORTED', status: 499 }
+    }
     const killed = this.one("SELECT value FROM meta WHERE key='provider_killed'")?.value === '1'
     if (killed) return { granted: false, terminal: true, code: 'SERVICE_DISABLED', status: 503 }
     const cooldown = Number(this.one("SELECT value FROM meta WHERE key='cooldown_until'")?.value ?? 0)

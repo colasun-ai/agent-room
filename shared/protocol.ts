@@ -42,7 +42,7 @@ export interface TranscriptMessage {
 }
 
 export interface PublicConfig {
-  releaseClass: 'PUBLIC_BETA'
+  releaseClass: 'PRIVATE_BETA'
   protocolTag: typeof PROTOCOL_TAG
   controlSchemaRevision: typeof CONTROL_SCHEMA_REVISION
   aiEnabled: boolean
@@ -92,6 +92,7 @@ export interface TurnRequest {
 
 export type ErrorCode =
   | 'INVALID_REQUEST'
+  | 'ACCESS_REQUIRED'
   | 'SESSION_REQUIRED'
   | 'SESSION_EXPIRED'
   | 'CHALLENGE_REQUIRED'

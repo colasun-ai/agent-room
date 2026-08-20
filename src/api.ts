@@ -15,11 +15,14 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  accessStatus: () => jsonRequest<{ authenticated: boolean }>('/api/access'),
+  unlock: (password: string) => jsonRequest<{ authenticated: true; expiresAt: number }>('/api/access', { method: 'POST', body: JSON.stringify({ password }) }),
   config: () => jsonRequest<PublicConfig>('/api/config'),
   session: (challengeToken?: string) => jsonRequest<{ expiresAt: number }>('/api/session', { method: 'POST', body: JSON.stringify(challengeToken ? { challengeToken } : {}) }),
   register: (request: RegisterRoomRequest) => jsonRequest<RegisterRoomResponse>('/api/rooms/register', { method: 'POST', body: JSON.stringify(request) }),
   control: (roomId: string, action: ControlAction) => jsonRequest<{ controlRevision: number }>(`/api/rooms/${encodeURIComponent(roomId)}/control`, { method: 'PATCH', body: JSON.stringify(action) }),
   skip: (roomId: string, body: { idempotencyKey: string; controlRevision: number; serverTurnId?: string }) => jsonRequest<{ controlRevision: number; runTurnsCompleted?: number; totalTurnsCompleted?: number }>(`/api/rooms/${encodeURIComponent(roomId)}/skip`, { method: 'POST', body: JSON.stringify(body) }),
+  cancel: (roomId: string, serverTurnId: string) => jsonRequest<{ ok: true }>(`/api/rooms/${encodeURIComponent(roomId)}/cancel`, { method: 'POST', body: JSON.stringify({ serverTurnId }) }),
 }
 
 function assertStreamEvent(value: unknown): StreamEvent {

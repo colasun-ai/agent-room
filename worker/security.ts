@@ -19,6 +19,17 @@ export async function hmac(secret: string, value: string): Promise<string> {
   return base64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value))))
 }
 
+export async function secretsEqual(provided: string, expected: string): Promise<boolean> {
+  const [left, right] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(provided)),
+    crypto.subtle.digest('SHA-256', encoder.encode(expected)),
+  ])
+  const leftBytes = new Uint8Array(left), rightBytes = new Uint8Array(right)
+  let difference = 0
+  for (let index = 0; index < leftBytes.length; index += 1) difference |= leftBytes[index] ^ rightBytes[index]
+  return difference === 0
+}
+
 function expandIpv6(value: string): number[] | undefined {
   const address = value.split('%', 1)[0].toLowerCase()
   if (!address.includes(':') || address.indexOf('::') !== address.lastIndexOf('::')) return undefined
@@ -66,6 +77,22 @@ async function verifyHmac(secret: string, value: string, signature: string): Pro
 export async function issueSession(identity: SessionIdentity, secret: string): Promise<string> {
   const payload = base64url(encoder.encode(JSON.stringify({ sid: identity.sessionId, exp: identity.expiresAt })))
   return `${payload}.${await hmac(secret, payload)}`
+}
+
+export async function issueAccess(expiresAt: number, secret: string): Promise<string> {
+  const payload = base64url(encoder.encode(JSON.stringify({ aid: crypto.randomUUID(), exp: expiresAt })))
+  return `${payload}.${await hmac(secret, payload)}`
+}
+
+export async function readAccess(request: Request, secret: string): Promise<boolean> {
+  const cookie = request.headers.get('cookie')?.split(';').map((part) => part.trim()).find((part) => part.startsWith('__Host-ar_access='))?.slice(17)
+  if (!cookie) return false
+  const [payload, signature, extra] = cookie.split('.')
+  if (!payload || !signature || extra || !(await verifyHmac(secret, payload, signature))) return false
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(decode(payload))) as { aid?: unknown; exp?: unknown }
+    return typeof parsed.aid === 'string' && typeof parsed.exp === 'number' && Number.isFinite(parsed.exp) && parsed.exp > Date.now()
+  } catch { return false }
 }
 
 export async function readSession(request: Request, secret: string): Promise<SessionIdentity | undefined> {
